@@ -19,13 +19,13 @@ batch_size=${batch_size:-1}
 num_batches=${num_batches:-3738}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
-train_fraction=${train_fraction:-1.0} 
+train_fraction=${train_fraction:-1.0}
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
 echo "  Num Batches: $num_batches"
 echo "  Num Epochs: $num_train_epochs"
-echo "  Warmup Ratio: $warmup_ratio" 
+echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 
 max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
@@ -45,15 +45,15 @@ python3 -m tunix.cli.grpo_main \
   reference_model_config.model_source="kaggle" \
   reference_model_config.model_download_path="/tmp/models/gemma2-2b" \
   reference_model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
-  reference_model_config.mesh.shape="(2,4)" \
+  reference_model_config.mesh.shape="(2,2)" \
   reference_model_config.mesh.axis_names="('fsdp','tp')" \
   reference_model_config.rng_seed=42 \
   actor_model_config.lora_config.rank=64 \
   actor_model_config.lora_config.alpha=64.0 \
   actor_model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum" \
-  actor_model_config.mesh.shape="(2,4)" \
+  actor_model_config.mesh.shape="(2,2)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
-  rollout_model_config.mesh.shape="(2,4)" \
+  rollout_model_config.mesh.shape="(2,2)" \
   rollout_model_config.mesh.axis_names="('fsdp','tp')" \
   tokenizer_config.tokenizer_path="/tmp/models/gemma2-2b/models/google/gemma-2/flax/gemma2-2b-it/1/tokenizer.model" \
   tokenizer_config.tokenizer_type="sentencepiece" \
@@ -94,4 +94,3 @@ python3 -m tunix.cli.grpo_main \
   grpo_config.beta=0.08 \
   grpo_config.epsilon=0.2 \
   reward_functions="['tunix/cli/reward_fn/gsm8k.py']"
-

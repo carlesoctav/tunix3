@@ -20,24 +20,28 @@ classifiers = [
 dependencies = [
   "datasets",
   "flax>=0.11.1",
-  "fsspec",  # notebook dependency
+  "fsspec", # notebook dependency
   "google-metrax>=0.2.3",
   "grain",
   "huggingface_hub",
   "jaxtyping",
-  "jinja2",  # Huggingface chat template
+  "jinja2", # Huggingface chat template
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
-  "pylatexenc",  # Eval result parsing
-  "python-dotenv",  # Huggingface API key
+  "pylatexenc", # Eval result parsing
+  "python-dotenv", # Huggingface API key
   "qwix",
   "sentencepiece",
-  "sympy",  # Eval result parsing
+  "sympy", # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
   "transformers<=4.57.1", # Note: transformers==4.57.2 has a bug, see more information at https://github.com/google/tunix/issues/794
-  "hf_transfer",  # Huggingface caching in CI
+  "hf_transfer", # Huggingface caching in CI
+  "tpu-info>=0.7.1",
+  "wandb>=0.23.1",
+  "gcsfs>=2025.10.0",
+  "orbax>=0.1.9",
 ]
 
 [project.optional-dependencies]
@@ -67,7 +71,7 @@ requires = ["setuptools >= 77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["tunix*"]
+include = ["tunix*", "research*"]
 
 [tool.pyink]
 line-length = 80

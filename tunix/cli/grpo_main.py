@@ -21,6 +21,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.grpo.grpo_learner import GrpoConfig
 from tunix.rl.rollout import base_rollout
+from dotenv import load_dotenv
 
 
 class GrpoPipeline(config.HyperParameters):
@@ -37,6 +38,7 @@ class GrpoPipeline(config.HyperParameters):
         temperature=rollout_config["temperature"],
         top_p=rollout_config["top_p"],
         top_k=rollout_config["top_k"],
+        eos_tokens=rollout_config.get("eos_tokens"),
     )
 
   def create_role_to_mesh(self):
@@ -133,4 +135,5 @@ def main(argv, **kwargs):
 
 
 if __name__ == "__main__":
-  app.run(main)
+    load_dotenv()
+    app.run(main)
