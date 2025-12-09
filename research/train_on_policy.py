@@ -490,30 +490,6 @@ class Pipeline:
         print("Training pipeline completed!")
         print(f"{'=' * 60}\n")
 
-        training_config = self.args.training_args.make(
-            step, full_exp_name, self.args.batch_size
-        )
-        rl_cluster = self._create_rl_cluster(training_config)
-        mesh = self.args.model_args.create_actor_mesh()
-
-        try:
-            for train_ds, reward_fns, name in data_sources:
-                learner = OnPolicyLearner(
-                    rl_cluster=rl_cluster,
-                    reward_fns=reward_fns,
-                    algo_config=self.args.on_policy_args.make(),
-                )
-
-                with mesh:
-                    learner.train(train_ds)
-                print(f"\nCompleted training on dataset: {name}")
-        finally:
-            rl_cluster.close()
-
-        print(f"\n{'=' * 60}")
-        print("Training pipeline completed!")
-        print(f"{'=' * 60}\n")
-
 
 def main():
     parser = argparse.ArgumentParser()
