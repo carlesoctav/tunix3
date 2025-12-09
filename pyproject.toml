@@ -42,6 +42,7 @@ dependencies = [
   "wandb>=0.23.1",
   "gcsfs>=2025.10.0",
   "orbax>=0.1.9",
+  "torch>=2.9.1",
 ]
 
 [project.optional-dependencies]

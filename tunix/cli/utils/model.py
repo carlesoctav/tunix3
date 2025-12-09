@@ -392,7 +392,9 @@ def create_model(
   else:
     logging.info('Training with Full Weight')
 
-  if model_config['model_display']:
+  if model_config.get('model_display', False):
     nnx.display(model)
+
+  print("DEBUGPRINT {}:")
 
   return model, tokenizer_path

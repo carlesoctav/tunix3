@@ -14,12 +14,62 @@
 
 """Utilities for saving models with merged LoRA weights in safetensors format."""
 
+import json
 import os
 import shutil
 from typing import Any, Callable
 
 import jax.numpy as jnp
 import safetensors.numpy as safe_np
+
+
+def _load_sharded_safetensors(local_model_path: str) -> dict:
+  """Load safetensors files, handling both single and sharded formats.
+  
+  Args:
+    local_model_path: Path to the model directory.
+    
+  Returns:
+    Combined state dict from all safetensors files.
+  """
+  index_path = os.path.join(local_model_path, 'model.safetensors.index.json')
+  single_path = os.path.join(local_model_path, 'model.safetensors')
+  
+  if os.path.exists(single_path):
+    # Single file format
+    return safe_np.load_file(single_path)
+  elif os.path.exists(index_path):
+    # Sharded format - load all shards and combine
+    with open(index_path, 'r') as f:
+      index = json.load(f)
+    
+    # Get unique shard files
+    shard_files = set(index.get('weight_map', {}).values())
+    
+    combined_state = {}
+    for shard_file in sorted(shard_files):
+      shard_path = os.path.join(local_model_path, shard_file)
+      if os.path.exists(shard_path):
+        shard_state = safe_np.load_file(shard_path)
+        combined_state.update(shard_state)
+      else:
+        raise FileNotFoundError(f"Shard file not found: {shard_path}")
+    
+    return combined_state
+  else:
+    # Try to find any safetensors file
+    safetensor_files = [f for f in os.listdir(local_model_path) if f.endswith('.safetensors')]
+    if safetensor_files:
+      combined_state = {}
+      for sf in sorted(safetensor_files):
+        shard_state = safe_np.load_file(os.path.join(local_model_path, sf))
+        combined_state.update(shard_state)
+      return combined_state
+    else:
+      raise FileNotFoundError(
+          f"No safetensors files found in {local_model_path}. "
+          f"Expected 'model.safetensors' or 'model.safetensors.index.json'"
+      )
 
 
 def qwix_path_to_str(qwix_path) -> str:
@@ -108,8 +158,8 @@ def save_lora_merged_model_as_safetensors(
     if custom_layer_extractor_fn:
       lora_layers |= custom_layer_extractor_fn(layer)
 
-  # Load base model state
-  base_state = safe_np.load_file(local_model_path + '/model.safetensors')
+  # Load base model state (handles both single and sharded formats)
+  base_state = _load_sharded_safetensors(local_model_path)
 
   # Apply LoRA deltas
   for lora_name, (lora_a, lora_b) in lora_layers.items():
@@ -138,8 +188,10 @@ def save_lora_merged_model_as_safetensors(
   safe_np.save_file(base_state, safetensors_path)
 
   # Copy non-safetensors files (config, tokenizer, etc.)
+  # Skip index files since we're saving as a single file
+  skip_patterns = ('.safetensors', '.safetensors.index.json')
   for filename in os.listdir(local_model_path):
-    if not filename.endswith('.safetensors'):
+    if not any(filename.endswith(pat) for pat in skip_patterns):
       src = os.path.join(local_model_path, filename)
       if os.path.isfile(src):
         dst = os.path.join(output_dir, filename)

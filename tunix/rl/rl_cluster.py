@@ -278,9 +278,10 @@ class RLCluster:
     ):
       return
     if sft_utils.is_lora_enabled(actor):
-      if reference and self.r2m[Role.ACTOR] == self.r2m[Role.REFERENCE]:
-        self._backbone_sharing_map[Role.ACTOR].append(Role.REFERENCE)
-        self._backbone_sharing_map[Role.REFERENCE].append(Role.ACTOR)
+        pass
+      # if reference and self.r2m[Role.ACTOR] == self.r2m[Role.REFERENCE]:
+        # self._backbone_sharing_map[Role.ACTOR].append(Role.REFERENCE)
+        # self._backbone_sharing_map[Role.REFERENCE].append(Role.ACTOR)
       # TODO(linchai): maybe support critic backbone sharing.
 
     self._propagate_backbone_sharing_map()

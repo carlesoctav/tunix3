@@ -1,8 +1,8 @@
 """
-Comprehensive GRPO training pipeline for research experiments.
+Comprehensive GRPO training pipeline for general-purpose research experiments.
 
 This module provides a structured way to configure and run GRPO training
-with support for multiple datasets, LoRA, and flexible model/training configurations.
+with support for LLM-as-a-judge reward, LoRA, and flexible model/training configurations.
 """
 
 import json
@@ -448,14 +448,14 @@ class Pipeline:
         print(f"{'=' * 60}\n")
 
 def main():
-    from research.math import MathDataConfig
+    from research.general import GeneralDataConfig, VLLMJudgeConfig
     args = Args(
-        exp_name="math-rl",
-        batch_size = 1,
+        exp_name="general-rl",
+        batch_size=1,
         model_args=ModelArgs(
             model_name="gemma2-2b-it",
             model_id="google/gemma-2/flax/gemma2-2b-it",
-            model_source = "kaggle",
+            model_source="kaggle",
             hf_tokenizer_path="google/gemma-2-2b-it",
             actor_mesh_shape=(4, 1),
             lora_config=LoraConfig(rank=8, alpha=8.0),
@@ -477,13 +477,20 @@ def main():
         ),
         data_args=DataArgs(
             sources=[
-                MathDataConfig(
-                    name="math-zeror-rl",
-                    path="allenai/Dolci-RL-Zero-Math-7B",
-                    tokenizer_path="google/gemma-3-1b-it",
+                GeneralDataConfig(
+                    name="general-zero-rl",
+                    path="allenai/Dolci-RL-Zero-General-7B",
+                    tokenizer_path="google/gemma-2-2b-it",
                     prompt_column="prompt",
-                    step = 3000,
+                    step=3000,
                     ground_truth_column="ground_truth",
+                    judge_model="meta-llama/Llama-3.1-8B-Instruct",
+                    vllm_config=VLLMJudgeConfig(
+                        model_version="meta-llama/Llama-3.1-8B-Instruct",
+                        max_model_len=4096,
+                        tensor_parallel_size=4,
+                        gpu_memory_utilization=0.5,
+                    ),
                 ),
             ]
         ),
