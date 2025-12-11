@@ -114,6 +114,35 @@ class MetricsLogger:
         f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step
     )
 
+  def log_table(
+      self,
+      metrics_prefix: str,
+      table_name: str,
+      data: dict[str, list[Any]],
+      mode: Mode | str,
+      step: int,
+  ):
+    """Logs a table to WandB if available."""
+    try:
+      import wandb
+
+      if wandb.run is not None:
+        keys = list(data.keys())
+        # Transpose dict to list of rows
+        # Assumes all lists in data values have same length
+        if not keys:
+          return
+        length = len(next(iter(data.values())))
+        rows = []
+        for i in range(length):
+          row = [data[k][i] for k in keys]
+          rows.append(row)
+
+        table = wandb.Table(columns=keys, data=rows)
+        wandb.log({f"{metrics_prefix}/{mode}/{table_name}": table}, step=step)
+    except (ImportError, Exception):  # pylint: disable=broad-exception-caught
+      pass
+
   def metric_exists(
       self, metrics_prefix, metric_name: str, mode: Mode | str
   ) -> bool:

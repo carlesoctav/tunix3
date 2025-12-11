@@ -242,18 +242,7 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
 
         # Log metrics for dense rewards
         valid_rewards = rewards * completion_mask
-        mean_reward = valid_rewards.sum() / jnp.clip(completion_mask.sum(), min=1)
-        per_seq_reward = valid_rewards.sum(axis=1)
-
-        self.rl_cluster.buffer_metrics(
-            {
-                "rewards/mean": (mean_reward, np.mean),
-                "rewards/per_seq_mean": (per_seq_reward.mean(), np.mean),
-                "rewards/per_seq_min": (per_seq_reward.min(), np.min),
-                "rewards/per_seq_max": (per_seq_reward.max(), np.max),
-            },
-            mode=mode,
-        )
+        per_seq_reward = valid_rewards.sum(axis=1) #[B*G, Seq] -> [B*G, ]
 
         # Log completion lengths
         completion_lengths = completion_mask.sum(axis=-1)
@@ -269,8 +258,6 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
         for i, (prompt, completion) in enumerate(zip(prompts, rollout_output.text)):
             self.rl_cluster.buffer_metrics(
                 {
-                    "prompts": (prompt, None),
-                    "completions": (completion, None),
                     "rewards/sum": (per_seq_reward[i], np.mean),
                 },
                 mode=mode,

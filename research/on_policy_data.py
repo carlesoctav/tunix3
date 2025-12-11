@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from functools import partial
 
 import grain
-from datasets import Dataset, concatenate_datasets, load_dataset
+from datasets import concatenate_datasets, load_dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 def preprocess(tokenizer, prompt_column, ground_truth_column, x):

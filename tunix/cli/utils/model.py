@@ -82,10 +82,22 @@ def create_model_dynamically(
   try:
     create_fn = getattr(params_module, 'create_model_from_safe_tensors')
   except AttributeError as exc:
-    raise AttributeError(
-        "'create_model_from_safe_tensors' not found in module "
-        f'{params_module.__name__} for model {model_name}'
-    ) from exc
+    # Fallback to params_safetensors if not found in params
+    try:
+      model_config_category = naming.get_model_config_category(model_name)
+      module_path = (
+          f'{_BASE_MODULE_PATH}.{model_config_category}.params_safetensors'
+      )
+      logging.info(
+          'Attempting to import params_safetensors: %s', module_path
+      )
+      params_module = importlib.import_module(module_path)
+      create_fn = getattr(params_module, 'create_model_from_safe_tensors')
+    except (ImportError, AttributeError):
+      raise AttributeError(
+          "'create_model_from_safe_tensors' not found in module "
+          f'{params_module.__name__} for model {model_name}'
+      ) from exc
 
   logging.info(
       'Calling %s.create_model_from_safe_tensors', params_module.__name__

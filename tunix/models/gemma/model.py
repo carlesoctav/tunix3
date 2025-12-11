@@ -183,6 +183,10 @@ class ModelConfig:
     return cls.gemma2_2b()
 
   @classmethod
+  def gemma_2_2b_it(cls):
+      return cls.gemma2_2b()
+
+  @classmethod
   def gemma2_9b(cls):
     num_layers = 42
     return cls(
@@ -208,6 +212,10 @@ class ModelConfig:
   @classmethod
   def gemma2_9b_it(cls):
     return cls.gemma2_9b()
+
+  @classmethod
+  def gemma_2_9b_it(cls):
+      return cls.gemma2_9b()
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):

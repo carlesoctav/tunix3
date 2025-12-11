@@ -14,7 +14,7 @@ from typing import Any
 
 import grain
 import sympy
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 from sympy.parsing.latex import parse_latex
 from transformers import AutoTokenizer
 from transformers.tokenization_utils import PreTrainedTokenizer
@@ -448,8 +448,9 @@ class MathDataConfig(DataWithRewardConfig):
     ) -> tp.Any:
         # Load and preprocess with HuggingFace (convenient map/filter)
         hf_ds = load_dataset(self.path, split="train")
-        hf_ds = hf_ds.map(self.preprocess, num_proc=self.num_proc, remove_columns=hf_ds.column_names)
-        hf_ds = hf_ds.filter(self.filter_length, num_proc=self.num_proc)
+        if isinstance(hf_ds, Dataset):
+            hf_ds = hf_ds.map(self.preprocess, num_proc=self.num_proc, remove_columns=hf_ds.column_names)
+            hf_ds = hf_ds.filter(self.filter_length, num_proc=self.num_proc)
         print(hf_ds)
         print("after filtering number of valid prompts are", len(hf_ds))
         print("Sanity check:", hf_ds[0])

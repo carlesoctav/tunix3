@@ -24,3 +24,15 @@
 /docs/sg_execution_times.rst
 /docs/generated
 build/*
+.env
+a.sh
+
+# Junk and Artifacts
+a.txt
+wandb/
+state.orbax-checkpoint-tmp/
+temp/
+models/
+data/
+.ruff_cache/
+.venv/

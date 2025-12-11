@@ -5,27 +5,35 @@ This module provides a structured way to configure and run On-Policy training
 with support for multiple datasets, LoRA, and flexible model/training configurations.
 """
 
+from typing import Callable
 import argparse
 import json
 import os
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import asdict, dataclass, field
+from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, Iterable, cast
+from typing import Any
 
 import jax
 import optax
 import orbax.checkpoint as ocp
+from dotenv import load_dotenv
 from flax import nnx
+from huggingface_hub import snapshot_download
 from jax.sharding import Mesh
-from transformers import AutoTokenizer, PreTrainedTokenizerBase, PreTrainedTokenizer
+from metrax.logging import WandbBackend
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerBase
 
-from research.data import DataWithRewardConfig
 from research.on_policy import OnPolicyConfig, OnPolicyLearner
 from research.on_policy_data import HFSource, OnPolicyData
+from tunix.cli.utils import (
+    model as cli_model_lib,
+)  # Keep for LoRA util if needed or re-implement
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
+
+load_dotenv()
 
 # Load Kaggle credentials from ~/.kaggle/kaggle.json
 _kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
@@ -62,25 +70,24 @@ class LoraConfig:
         }
 
 
+class ModelFamily(Enum):
+    Gemma2 = auto()
+    Gemma3 = auto()
+
+
 @dataclass
 class ModelArgs:
     """Model configuration arguments."""
 
+    model_family: ModelFamily
     model_name: str
     model_id: str
     model_source: str
     hf_tokenizer_path: str
-    model_download_path: str = "/mnt/carles/models"
-    intermediate_ckpt_dir: str = "/tmp/tunix_fresh_ckpt"
-    _resolved_intermediate_ckpt_dir: str = ""
 
-    # Reference model args
     ref_model_name: str | None = None
     ref_model_id: str | None = None
     ref_model_source: str | None = None
-    ref_model_download_path: str | None = "/mnt/carles/models"
-    ref_intermediate_ckpt_dir: str | None = "/mnt/carles/models/intermediate_ckpt"
-    _resolved_ref_intermediate_ckpt_dir: str = ""
 
     mesh_axis_names: tuple[str, ...] = ("fsdp", "tp")
     actor_mesh_shape: tuple[int, ...] = (4, 1)
@@ -93,15 +100,6 @@ class ModelArgs:
     def __post_init__(self):
         if self.rollout_mesh_shape is None:
             self.rollout_mesh_shape = self.actor_mesh_shape
-        # Make intermediate_ckpt_dir unique per model to avoid conflicts on reruns
-        self._resolved_intermediate_ckpt_dir = os.path.join(
-            self.intermediate_ckpt_dir, self.model_name
-        )
-
-        # Resolve reference intermediate ckpt dir
-        ref_name = self.ref_model_name or self.model_name
-        ref_ckpt_dir = self.ref_intermediate_ckpt_dir or self.intermediate_ckpt_dir
-        self._resolved_ref_intermediate_ckpt_dir = os.path.join(ref_ckpt_dir, ref_name)
 
     def _create_mesh(self, mesh_shape: tuple[int, ...]) -> Mesh:
         """Create a JAX mesh with the given shape."""
@@ -118,38 +116,6 @@ class ModelArgs:
             return self._create_mesh(self.actor_mesh_shape)
         return self._create_mesh(self.rollout_mesh_shape)
 
-    def _get_model_config(self) -> dict[str, Any]:
-        """Get model config dict for tunix model loading."""
-        config = {
-            "model_name": self.model_name,
-            "model_id": self.model_id,
-            "model_source": self.model_source,
-            "model_download_path": self.model_download_path,
-            "intermediate_ckpt_dir": self._resolved_intermediate_ckpt_dir,
-            "rng_seed": self.rng_seed,
-            "model_display": False,  # Explicitly set to False to avoid printing model parameters
-        }
-        return config
-
-    def _get_ref_model_config(self) -> dict[str, Any]:
-        """Get reference model config dict for tunix model loading."""
-        name = self.ref_model_name or self.model_name
-        mid = self.ref_model_id or self.model_id
-        source = self.ref_model_source or self.model_source
-        download_path = self.ref_model_download_path or self.model_download_path
-
-        config = {
-            "model_name": name,
-            "model_id": mid,
-            "model_source": source,
-            "model_download_path": download_path,
-            "intermediate_ckpt_dir": self._resolved_ref_intermediate_ckpt_dir,
-            "rng_seed": self.rng_seed,
-            "model_display": False,  # Explicitly set to False to avoid printing model parameters
-        }
-        # No LoRA for reference model
-        return config
-
     def make(self) -> tuple[nnx.Module, nnx.Module, PreTrainedTokenizerBase]:
         """
         Create actor model, reference model, and tokenizer.
@@ -157,33 +123,56 @@ class ModelArgs:
         Returns:
             Tuple of (actor_model, reference_model, tokenizer)
         """
-        from tunix.cli.utils import model as model_lib
-
         actor_mesh = self.create_actor_mesh()
         ref_mesh = self.create_ref_mesh()
 
-        # Create reference model config (without LoRA)
-        ref_config = self._get_ref_model_config()
-        actor_config = self._get_model_config()
+        def load_model(model_id: str, model_name: str, mesh: Mesh) -> nnx.Module:
+            print(f"Downloading/Loading {model_id} from Hugging Face...")
+            local_model_path = snapshot_download(
+                repo_id=model_id,
+                ignore_patterns=["*.pth"],
+            )
+            print(f"Model path: {local_model_path}")
 
-        tokenizer_config = {"tokenizer_path": self.hf_tokenizer_path}
+            if self.model_family == ModelFamily.Gemma2:
+                from tunix.models.gemma import model as gemma_model
+                from tunix.models.gemma import params_safetensors as params
 
-        reference_model, _ = model_lib.create_model(
-            ref_config, tokenizer_config, ref_mesh
-        )
+                config_method_name = model_name.replace("-", "_")
+                config_fn = getattr(gemma_model.ModelConfig, config_method_name)
+                config = config_fn()
+                model = params.create_model_from_safe_tensors(
+                    local_model_path, config, mesh
+                )
+                return model
+            elif self.model_family == ModelFamily.Gemma3:
+                from tunix.models.gemma3 import model as gemma_model
+                from tunix.models.gemma3 import params_safetensors as params
 
-        actor_model, _ = model_lib.create_model(
-            actor_config, tokenizer_config, actor_mesh
-        )
+                config_method_name = model_name.replace("-", "_")
+                config_fn = getattr(gemma_model.ModelConfig, config_method_name)
+                config = config_fn()
+                model = params.create_model_from_safe_tensors(
+                    local_model_path, config, mesh
+                )
+                return model
+            else:
+                raise NotImplementedError
+
+        # Load Reference Model
+        ref_model_id = self.ref_model_id or self.model_id
+        ref_model_name = self.ref_model_name or self.model_name
+        reference_model = load_model(ref_model_id, ref_model_name, ref_mesh)
+
+        actor_model = load_model(self.model_id, self.model_name, actor_mesh)
 
         if self.lora_config:
-            actor_model = model_lib.apply_lora_to_model(
+            print("Applying LoRA to actor model...")
+            actor_model = cli_model_lib.apply_lora_to_model(
                 actor_model,
                 actor_mesh,
                 self.lora_config.to_dict(),
             )
-
-        print("DEBUGPRINT {after applying_lora}:")
 
         tokenizer = AutoTokenizer.from_pretrained(self.hf_tokenizer_path)
         return actor_model, reference_model, tokenizer
@@ -278,7 +267,7 @@ class TrainingArgs:
     flush_every_n_steps: int = 20
 
     def make(
-        self, max_steps: int, exp_name: str, batch_size: int
+        self, max_steps: int, exp_name: str, batch_size: int, factories: Callable
     ) -> rl_cluster_lib.RLTrainingConfig:
         """
         Create RLTrainingConfig.
@@ -291,7 +280,6 @@ class TrainingArgs:
             RLTrainingConfig instance
         """
         optimizer = self.optimizer_config.make(max_steps)
-
         checkpoint_dir = os.path.join(self.checkpoint_root_directory, exp_name)
 
         return rl_cluster_lib.RLTrainingConfig(
@@ -309,6 +297,7 @@ class TrainingArgs:
             metrics_logging_options=metrics_logger.MetricsLoggerOptions(
                 log_dir=os.path.join(self.log_dir, exp_name),
                 flush_every_n_steps=self.flush_every_n_steps,
+                backend_factories=factories,
             ),
         )
 
@@ -350,31 +339,6 @@ class OnPolicyArgs:
             num_generations=self.num_generations,
             num_iterations=self.num_iterations,
         )
-
-
-@dataclass
-class DataArgs:
-    """Data configuration with multiple sources."""
-
-    sources: list[DataWithRewardConfig] = field(default_factory=list)
-
-    def make(self, batch_size: int) -> list[tuple[Iterable, list[Callable], str]]:
-        """
-        Create datasets and reward functions for each source.
-
-        Args:
-            batch_size: Batch size for datasets
-
-        Returns:
-            List of (dataset, reward_functions, name) tuples
-        """
-        results = []
-        for source in self.sources:
-            train_ds = source.make(batch_size)
-            reward_fns = source.all_reward
-            results.append((train_ds, reward_fns, source.name))
-
-        return results
 
 
 @dataclass
@@ -460,6 +424,11 @@ class Pipeline:
         if not train_ds:
             raise ValueError("No data sources configured")
 
+        def logging_factories():
+            config = asdict(self.args)
+            print("DEBUGPRINT {config}:", config)
+            return WandbBackend(self.args.project, self.args.exp_name, config=config)
+
         full_exp_name = f"{self.args.exp_name}"
         step = self.args.data_args.step * self.args.on_policy_args.num_iterations
 
@@ -469,7 +438,7 @@ class Pipeline:
         print(f"{'=' * 60}\n")
 
         training_config = self.args.training_args.make(
-            step, full_exp_name, self.args.batch_size
+            step, full_exp_name, self.args.batch_size, [logging_factories]
         )
         rl_cluster = self._create_rl_cluster(training_config)
 
@@ -493,38 +462,37 @@ class Pipeline:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--exp-name", type=str, default="math-on-policy", help="Experiment name"
-    )
+    parser.add_argument("--exp-name", type=str)
+    parser.add_argument("--project", type=str)
     script_args = parser.parse_args()
 
     args = Args(
         exp_name=script_args.exp_name,
         batch_size=4,
         model_args=ModelArgs(
-            model_name="gemma3-1b-it",
-            model_id="gs://gemma-data/checkpoints/gemma3-1b-it",
-            model_source="gcs",
-            ref_model_name="gemma3-12b-it",
-            ref_model_id="gs://gemma-data/checkpoints/gemma3-12b-it",
-            ref_model_source="gcs",
-            hf_tokenizer_path="google/gemma-3-1b-it",
+            model_family=ModelFamily.Gemma2,
+            model_name="gemma-2-2b-it",
+            model_id="google/gemma-2-2b-it",
+            model_source="huggingface",
+            ref_model_name="gemma-2-9b-it",
+            ref_model_id="google/gemma-2-9b-it",
+            ref_model_source="huggingface",
+            hf_tokenizer_path="google/gemma-2-2b-it",
             actor_mesh_shape=(4, 1),
             rollout_mesh_shape=(1, 4),
-            lora_config=LoraConfig(rank=1, alpha=1),
+            lora_config=LoraConfig(rank=16, alpha=16),
         ),
         training_args=TrainingArgs(
-            train_micro_batch_size=1,
+            train_micro_batch_size=4,
             optimizer_config=OptimizerConfig(
-                opt_type="sgd",
-                schedule_type="constant",
-                peak_value=1e-2,
+                peak_value=3e-4,
+                weight_decay=0.0,
             ),
         ),
         rollout_args=RolloutArgs(
             max_tokens_to_generate=1024,
             max_prompt_length=256,
-            eos_tokens = [1, 106],
+            # eos_tokens=[1, 106],
         ),
         on_policy_args=OnPolicyArgs(
             num_generations=4,
@@ -539,12 +507,14 @@ def main():
                     ground_truth_column="answer",
                 )
             ],
-            tokenizer_path="google/gemma-3-1b-it",
+            tokenizer_path="google/gemma-2-2b-it",
             max_prompt_len=256,
             num_proc=4,
             step=7470 // 4,
         ),
     )
+    # Attach project to args dynamically since Args dataclass does not define it.
+    setattr(args, "project", script_args.project)
     pipeline = Pipeline(args)
     pipeline.run()
 
