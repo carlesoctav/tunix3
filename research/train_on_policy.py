@@ -345,6 +345,7 @@ class OnPolicyArgs:
 class Args:
     """Complete training arguments."""
 
+    project: str
     exp_name: str
     batch_size: int
     model_args: ModelArgs
@@ -468,16 +469,17 @@ def main():
 
     args = Args(
         exp_name=script_args.exp_name,
+        project = script_args.project,
         batch_size=4,
         model_args=ModelArgs(
-            model_family=ModelFamily.Gemma2,
-            model_name="gemma-2-2b-it",
-            model_id="google/gemma-2-2b-it",
+            model_family=ModelFamily.Gemma3,
+            model_name="gemma-3-1b-it",
+            model_id="google/gemma-3-1b-it",
             model_source="huggingface",
-            ref_model_name="gemma-2-9b-it",
-            ref_model_id="google/gemma-2-9b-it",
+            ref_model_name="gemma-3-12b-it",
+            ref_model_id="google/gemma-3-12b-it",
             ref_model_source="huggingface",
-            hf_tokenizer_path="google/gemma-2-2b-it",
+            hf_tokenizer_path="google/gemma-3-1b-it",
             actor_mesh_shape=(4, 1),
             rollout_mesh_shape=(1, 4),
             lora_config=LoraConfig(rank=16, alpha=16),
@@ -492,7 +494,7 @@ def main():
         rollout_args=RolloutArgs(
             max_tokens_to_generate=1024,
             max_prompt_length=256,
-            # eos_tokens=[1, 106],
+            eos_tokens=[1, 106],
         ),
         on_policy_args=OnPolicyArgs(
             num_generations=4,
@@ -507,7 +509,7 @@ def main():
                     ground_truth_column="answer",
                 )
             ],
-            tokenizer_path="google/gemma-2-2b-it",
+            tokenizer_path="google/gemma-3-1b-it",
             max_prompt_len=256,
             num_proc=4,
             step=7470 // 4,

@@ -166,6 +166,14 @@ class ModelConfig:
     return cls.gemma3_1b(sharding_config=sharding_config)
 
   @classmethod
+  def gemma_3_1b_it(
+        cls,
+        sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+    ) -> 'ModelConfig':
+      """Gemma3-1B instruction-tuned text-only config."""
+      return cls.gemma3_1b(sharding_config=sharding_config)
+
+  @classmethod
   def gemma3_4b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
@@ -223,6 +231,14 @@ class ModelConfig:
   ) -> 'ModelConfig':
     """Gemma3-12B instruction-tuned text-only config."""
     return cls.gemma3_12b(sharding_config=sharding_config)
+
+  @classmethod
+  def gemma_3_12b_it(
+        cls,
+        sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+    ) -> 'ModelConfig':
+      """Gemma3-12B instruction-tuned text-only config."""
+      return cls.gemma3_12b(sharding_config=sharding_config)
 
   @classmethod
   def gemma3_27b(
