@@ -32,7 +32,6 @@ a.txt
 wandb/
 state.orbax-checkpoint-tmp/
 temp/
-models/
 data/
 .ruff_cache/
 .venv/
