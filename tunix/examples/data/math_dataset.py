@@ -30,10 +30,10 @@ provide your reasoning. Place it between {reasoning_start} and \
 value) between {solution_start} and {solution_end}."""
 
 TEMPLATE = """<start_of_turn>user
-{system_prompt}
-
 {question}<end_of_turn>
-<start_of_turn>model"""
+<start_of_turn>model
+
+"""
 
 
 def extract_hash_answer(text: str) -> str | None:
@@ -62,7 +62,6 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
           lambda x: {
               # passed to model forward pass
               "prompts": TEMPLATE.format(
-                  system_prompt=SYSTEM_PROMPT,
                   question=x["question"].decode("utf-8"),
               ),
               # passed to reward functions
@@ -87,6 +86,7 @@ def get_dataset_from_parquet(parquet_path, tokenizer):
     }
 
   dataset = dataset.map(process_element)
+  print("DEBUGPRINT {dataset[0]}:", dataset[0])
   return dataset
 
 

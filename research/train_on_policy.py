@@ -5,14 +5,13 @@ This module provides a structured way to configure and run On-Policy training
 with support for multiple datasets, LoRA, and flexible model/training configurations.
 """
 
-from typing import Callable
 import argparse
 import json
 import os
 from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import jax
 import optax
@@ -498,7 +497,7 @@ def main():
         ),
         on_policy_args=OnPolicyArgs(
             num_generations=4,
-            num_iterations=2,
+            num_iterations=1,
         ),
         data_args=OnPolicyData(
             sources=[

@@ -36,95 +36,57 @@ match_format = re.compile(
 
 # All reward functions must have this signature.
 def match_format_exactly(prompts, completions, **kwargs):
-  return [
-      0 if match_format.search(response) is None else 3.0
-      for response in completions
-  ]
+  # User requested to turn off formatting rewards
+  return [0.0 for _ in completions]
 
 
 def match_format_approximately(prompts, completions, **kwargs):
-  scores = []
-
-  for completion in completions:
-    score = 0
-    response = completion
-    # Count how many keywords are seen - we penalize if too many!
-    # If we see 1, then plus some points!
-    score += 0.5 if response.count(reasoning_start) == 1 else -0.5
-    score += 0.5 if response.count(reasoning_end) == 1 else -0.5
-    score += 0.5 if response.count(solution_start) == 1 else -0.5
-    score += 0.5 if response.count(solution_end) == 1 else -0.5
-    scores.append(score)
-  return scores
+  # User requested to turn off formatting rewards
+  return [0.0 for _ in completions]
 
 
 def check_answer(prompts, completions, answer, **kwargs):
   responses = completions
 
-  extracted_responses = [
-      guess.group(1) if (guess := match_format.search(r)) is not None else None
-      for r in responses
-  ]
+  fallback_regex = re.compile(r"(-?[$0-9.,]{2,})|(-?[0-9]+)")
+  extracted_responses = []
+  for r in responses:
+    match = match_format.search(r)
+    if match:
+      extracted_responses.append(match.group(1))
+    else:
+      matches = fallback_regex.findall(r)
+      if matches:
+        extracted_responses.append(max(matches[-1], key=len))
+      else:
+        extracted_responses.append(None)
 
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
-    score = 0
     if guess is None:
-      scores.append(0)
+      scores.append(0.0)
       continue
-    # Correct answer gets 3 points!
-    if guess == true_answer:
-      score += 3.0
-    # Match if spaces are seen
-    elif guess.strip() == true_answer.strip():
-      score += 1.5
-    else:
-      # Reward it if the answer is close via ratios!
-      # Ie if the answer is within some range, reward it!
-      try:
-        ratio = float(guess) / float(true_answer)
-        if ratio >= 0.9 and ratio <= 1.1:
-          score += 0.5
-        elif ratio >= 0.8 and ratio <= 1.2:
-          score += 0.25
-        else:
-          score -= 1.0  # Penalize wrong answers
-      except (ValueError, ZeroDivisionError):
-        score -= 0.5  # Penalize
-    scores.append(score)
+    
+    matched = False
+    # 1. Numeric Check
+    try:
+      # Remove commas for cleaner number parsing (e.g. "1,000")
+      val_guess = float(guess.replace(',', ''))
+      val_true = float(true_answer.replace(',', ''))
+      if val_guess == val_true:
+        matched = True
+    except ValueError:
+      pass
+
+    # 2. String Check (Fallback)
+    if not matched:
+      if guess == true_answer or guess.strip() == true_answer.strip():
+        matched = True
+            
+    scores.append(1.0 if matched else 0.0)
   return scores
 
 
 def check_numbers(prompts, completions, answer, **kwargs):
-  match_numbers = re.compile(
-      rf"{solution_start}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
-  )
-  match_numbers.findall(f"{solution_start}  0.34  {solution_end}")
-  question = kwargs["question"]
-  responses = completions
-
-  extracted_responses = [
-      guess.group(1) if (guess := match_numbers.search(r)) is not None else None
-      for r in responses
-  ]
-
-  scores = []
-  logging.info("START ============================")
-  logging.info(f"Question: {question[0]}")
-  logging.info(f"Answer: {answer[0]}")
-  logging.info(f"Response: {responses[0]}")
-  logging.info(f"Extracted: {extracted_responses[0]}")
-  logging.info("END ==============================")
-  for guess, true_answer in zip(extracted_responses, answer):
-    if guess is None:
-      scores.append(0)
-      continue
-    # Convert to numbers
-    try:
-      true_answer = float(true_answer.strip())
-      guess = float(guess.strip())
-      scores.append(1.5 if guess == true_answer else 0.0)
-    except ValueError:
-      scores.append(0)
-      continue
-  return scores
+  # Using the same robust logic as check_answer per user request
+  return check_answer(prompts, completions, answer, **kwargs)

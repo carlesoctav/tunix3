@@ -15,9 +15,9 @@
 
 set -x # Enable xtrace
 
-batch_size=${batch_size:-4}
-mini_batch_size=${mini_batch_size:-4}
-train_micro_batch_size=${train_micro_batch_size:-1}
+batch_size=${batch_size:-8}
+mini_batch_size=${mini_batch_size:-8}
+train_micro_batch_size=${train_micro_batch_size:-8}
 num_iterations=${num_iterations:-1}
 num_batches=${num_batches:-3738}
 num_train_epochs=${num_train_epochs:-1}
@@ -71,13 +71,13 @@ python3 -m tunix.cli.grpo_main \
   reference_model_config.model_source="kaggle" \
   reference_model_config.model_download_path="/tmp/models/gemma2-2b" \
   reference_model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
-  reference_model_config.mesh.shape="(4,1)" \
+  reference_model_config.mesh.shape="(1,4)" \
   reference_model_config.mesh.axis_names="('fsdp','tp')" \
   reference_model_config.rng_seed=42 \
   actor_model_config.lora_config.rank=16 \
   actor_model_config.lora_config.alpha=16 \
   actor_model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum" \
-  actor_model_config.mesh.shape="(4,1)" \
+  actor_model_config.mesh.shape="(1,4)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   rollout_model_config.mesh.shape="(1,4)" \
   rollout_model_config.mesh.axis_names="('fsdp','tp')" \
@@ -107,7 +107,7 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.metrics_logging_options.flush_every_n_steps=20 \
   rl_training_config.checkpointing_options.save_interval_steps=500 \
   rl_training_config.checkpointing_options.max_to_keep=4 \
-  rl_training_config.checkpoint_root_directory="gs://carles-git-good/tunix/gemma2-repro" \
+  rl_training_config.checkpoint_root_directory="gs://carles-git-good/tunix/gemma2-repro-debug-speed" \
   rl_training_config.mini_batch_size=$mini_batch_size \
   rl_training_config.train_micro_batch_size=$train_micro_batch_size \
   rl_training_config.profiler_options={} \
