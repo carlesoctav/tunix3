@@ -33,20 +33,14 @@ match_format = re.compile(
     flags=re.MULTILINE | re.DOTALL,
 )
 
-
-# All reward functions must have this signature.
-def match_format_exactly(prompts, completions, **kwargs):
-  # User requested to turn off formatting rewards
-  return [0.0 for _ in completions]
-
-
-def match_format_approximately(prompts, completions, **kwargs):
-  # User requested to turn off formatting rewards
-  return [0.0 for _ in completions]
-
-
 def check_answer(prompts, completions, answer, **kwargs):
   responses = completions
+
+  print("======= start =======")
+  print("DEBUGPRINT {prompts[0]}:", prompts[0])
+  print("DEBUGPRINT {completions[0]}:", completions[0])
+  print("DEBUGPRINT {answer[0]}:", answer[0])
+  print("======= end =======")
 
   fallback_regex = re.compile(r"(-?[$0-9.,]{2,})|(-?[0-9]+)")
   extracted_responses = []
@@ -66,7 +60,7 @@ def check_answer(prompts, completions, answer, **kwargs):
     if guess is None:
       scores.append(0.0)
       continue
-    
+
     matched = False
     # 1. Numeric Check
     try:
@@ -82,11 +76,6 @@ def check_answer(prompts, completions, answer, **kwargs):
     if not matched:
       if guess == true_answer or guess.strip() == true_answer.strip():
         matched = True
-            
+
     scores.append(1.0 if matched else 0.0)
   return scores
-
-
-def check_numbers(prompts, completions, answer, **kwargs):
-  # Using the same robust logic as check_answer per user request
-  return check_answer(prompts, completions, answer, **kwargs)
