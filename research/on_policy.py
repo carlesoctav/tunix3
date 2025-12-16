@@ -40,6 +40,7 @@ class OnPolicyConfig(algo_config_lib.AlgorithmConfig):
     policy_loss_fn: str = "on_policy_loss"
     num_generations: int = 1
     num_iterations: int = 1
+    kl_penalty_coef: float = 1.0
 
     def __post_init__(self):
         return
@@ -48,29 +49,58 @@ class OnPolicyConfig(algo_config_lib.AlgorithmConfig):
 TOnPolicyConfig = TypeVar("TOnPolicyConfig", bound=OnPolicyConfig)
 
 
-def on_policy_reward(log_prob_student: jax.Array, log_prob_ref: jax.Array) -> jax.Array:
-    """Computes the on-policy reward.
+def on_policy_reward(
+    log_prob_student: jax.Array,
+    log_prob_ref: jax.Array,
+    kl_penalty_coef: float = 1.0,
+) -> jax.Array:
+    """Computes the on-policy reward (negative reverse KL).
 
     Args:
       log_prob_student: Log probabilities from the student model.
       log_prob_ref: Log probabilities from the reference model.
+      kl_penalty_coef: Coefficient for KL penalty scaling.
 
     Returns:
-      The computed reward (log_prob_ref - log_prob_student).
+      The computed reward: -kl_penalty_coef * (log_student - log_ref).
     """
-    return log_prob_ref - log_prob_student  # type: ignore
+    # Reverse KL: log_student - log_ref, negate for reward
+    return kl_penalty_coef * (log_prob_ref - log_prob_student)  # type: ignore
 
 
-def compute_advantages(rewards: jax.Array) -> jax.Array:
-    """Computes advantages from rewards.
+def compute_advantages(
+    rewards: jax.Array,
+    num_generations: int,
+) -> jax.Array:
+    """Computes advantages from rewards with per-group centering.
+
+    Centers advantages within each prompt's generations to ensure
+    relative comparison between different completions.
 
     Args:
-      rewards: The computed rewards.
+      rewards: Per-token rewards of shape [B*G, seq_len].
+      num_generations: Number of generations per prompt (G).
 
     Returns:
-      The advantages (same as rewards in this case).
+      Centered advantages of shape [B*G, seq_len].
     """
-    return rewards
+    if num_generations <= 1:
+        # No centering possible with single generation per prompt
+        return rewards
+
+    # rewards shape: [B*G, seq_len]
+    batch_times_gen, seq_len = rewards.shape
+    batch_size = batch_times_gen // num_generations
+
+    # Reshape to [B, G, seq_len] for per-group centering
+    rewards_reshaped = rewards.reshape(batch_size, num_generations, seq_len)
+
+    # Center within each group (across G dimension)
+    group_mean = jnp.mean(rewards_reshaped, axis=1, keepdims=True)
+    centered = rewards_reshaped - group_mean
+
+    # Flatten back to [B*G, seq_len]
+    return centered.reshape(batch_times_gen, seq_len)
 
 
 @function_registry.register_policy_loss_fn("on_policy_loss")
@@ -235,14 +265,16 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
         ref_logps = cast(jax.Array, ref_per_token_logps)
         old_logps = cast(jax.Array, old_per_token_logps)
 
-        rewards = on_policy_reward(old_logps, ref_logps) # [B*G, seq]
+        rewards = on_policy_reward(
+            old_logps, ref_logps, kl_penalty_coef=self.algo_config.kl_penalty_coef
+        )  # [B*G, seq]
 
-        # 4. Compute Advantages
-        advantages = compute_advantages(rewards)
+        # 4. Compute Advantages (with per-group centering)
+        advantages = compute_advantages(rewards, self.algo_config.num_generations)
 
         # Log metrics for dense rewards
         valid_rewards = rewards * completion_mask
-        per_seq_reward = valid_rewards.sum(axis=1) #[B*G, Seq] -> [B*G, ]
+        per_seq_reward = valid_rewards.sum(axis=1)  # [B*G, Seq] -> [B*G, ]
 
         # Log completion lengths
         completion_lengths = completion_mask.sum(axis=-1)
