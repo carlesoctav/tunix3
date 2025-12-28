@@ -43,7 +43,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, snapshot_download
 import numpy as np
 from orbax import checkpoint as ocp
 import safetensors.numpy as safe_np
@@ -369,6 +369,90 @@ def load_gemma2_with_lora_from_orbax(
     return model
 
 
+def load_gemma3_with_lora_from_orbax(
+    ckpt_path: str,
+    base_model_path: str,
+    model_name: str = "gemma3-1b-it",
+    lora_rank: int = 64,
+    lora_alpha: float = 64.0,
+    lora_module_path: str = ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum",
+) -> nnx.Module:
+    """Load a Gemma3 model with LoRA weights from Orbax checkpoint.
+
+    Args:
+        ckpt_path: Path to the Orbax checkpoint directory (can be GCS path).
+        base_model_path: Path to the base model (HuggingFace format with safetensors).
+        model_name: Model name (e.g., 'gemma3-1b-it').
+        lora_rank: LoRA rank used during training.
+        lora_alpha: LoRA alpha used during training.
+        lora_module_path: Regex pattern for LoRA modules.
+
+    Returns:
+        The model with LoRA weights loaded.
+    """
+    import qwix
+    from tunix.cli.utils import model as cli_model_lib
+    from tunix.models.gemma3 import model as gemma3_model_lib
+    from tunix.models.gemma3 import params_safetensors
+
+    # Create mesh for CPU (single device with both axes)
+    devices = jax.devices()
+    num_devices = len(devices)
+    mesh = jax.sharding.Mesh(
+        np.array(devices).reshape(num_devices, 1), axis_names=("fsdp", "tp")
+    )
+
+    # Get model config
+    model_params = cli_model_lib.obtain_model_params(model_name)
+
+    # Load base model from safetensors
+    print(f"Loading base model from {base_model_path}...")
+    model = params_safetensors.create_model_from_safe_tensors(
+        file_dir=base_model_path,
+        config=model_params,
+        mesh=mesh,
+    )
+
+    # Apply LoRA to get the structure
+    print("Applying LoRA structure...")
+    lora_provider = qwix.LoraProvider(
+        module_path=lora_module_path,
+        rank=lora_rank,
+        alpha=lora_alpha,
+    )
+    model_input = model.get_model_input()
+    lora_model = qwix.apply_lora_to_model(model, lora_provider, **model_input)
+
+    # Prepare abstract state for restore (LoRA params only)
+    abs_state = nnx.state(lora_model, nnx.LoRAParam)
+
+    def map_to_pspec(data):
+        return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
+
+    restore_args_dict = jax.tree.map(map_to_pspec, abs_state)
+    checkpoint_args = ocp.args.PyTreeRestore(
+        item=abs_state, restore_args=restore_args_dict
+    )
+
+    # Restore LoRA weights from checkpoint using Composite
+    print(f"Restoring LoRA weights from {ckpt_path}...")
+    checkpointer = ocp.CheckpointManager(
+        ckpt_path, options=ocp.CheckpointManagerOptions()
+    )
+    latest_step = checkpointer.latest_step()
+    print(f"Latest checkpoint step: {latest_step}")
+
+    ckpt = checkpointer.restore(
+        latest_step,
+        args=ocp.args.Composite(model_params=checkpoint_args),
+    )
+
+    # Update model with restored LoRA params
+    nnx.update(lora_model, ckpt.model_params)
+
+    return lora_model
+
+
 def merge_lora_weights(model: nnx.Module, rank: int, alpha: float) -> nnx.Module:
     """Merge LoRA weights into the base model weights.
 
@@ -462,6 +546,12 @@ def main():
         help="Path to the base model safetensors directory (for non-Orbax checkpoints)",
     )
     parser.add_argument(
+        "--base-model-id",
+        type=str,
+        default=None,
+        help="HuggingFace model ID for base model (e.g., google/gemma-3-1b-it)",
+    )
+    parser.add_argument(
         "--model-type",
         type=str,
         choices=["gemma2", "gemma3", "qwen3"],
@@ -505,8 +595,8 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate checkpoint path
-    if not os.path.exists(args.ckpt):
+    # Validate checkpoint path (skip for GCS paths)
+    if not args.ckpt.startswith("gs://") and not os.path.exists(args.ckpt):
         raise FileNotFoundError(f"Checkpoint path not found: {args.ckpt}")
 
     # Set output directory
@@ -536,6 +626,35 @@ def main():
 
         print("Saving model as safetensors...")
         save_gemma2_model_as_safetensors(model, output_dir, args.model_name)
+
+    elif args.model_type == "gemma3":
+        # Download base model if not provided
+        if args.base_model_path:
+            base_model_path = args.base_model_path
+        else:
+            base_model_id = args.base_model_id or "google/gemma-3-1b-it"
+            print(f"Downloading base model {base_model_id}...")
+            base_model_path = snapshot_download(base_model_id)
+
+        print(f"\nLoading Gemma3 model with LoRA from Orbax checkpoint...")
+        model = load_gemma3_with_lora_from_orbax(
+            ckpt_path=args.ckpt,
+            base_model_path=base_model_path,
+            model_name=args.model_name,
+            lora_rank=args.rank,
+            lora_alpha=args.alpha,
+            lora_module_path=args.lora_module_path,
+        )
+
+        print("Merging LoRA weights and saving as safetensors...")
+        save_lora_merged_model_as_safetensors(
+            local_model_path=base_model_path,
+            output_dir=output_dir,
+            lora_model=model,
+            rank=args.rank,
+            alpha=args.alpha,
+            model_type="gemma3",
+        )
 
     elif args.base_model_path:
         # For models with safetensors base (gemma3, qwen3)

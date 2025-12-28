@@ -235,7 +235,7 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
         ref_logps = cast(jax.Array, ref_per_token_logps)
         old_logps = cast(jax.Array, old_per_token_logps)
 
-        rewards = on_policy_reward(old_logps, ref_logps)
+        rewards = on_policy_reward(old_logps, ref_logps) # [B*G, seq]
 
         # 4. Compute Advantages
         advantages = compute_advantages(rewards)

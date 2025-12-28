@@ -128,7 +128,6 @@ class GrpoPipeline(config.HyperParameters):
     with mesh:
       grpo_trainer.train(dataset)
 
-
 def main(argv, **kwargs):
   pipeline = GrpoPipeline(argv, **kwargs)
   pipeline.run_grpo_trainer()

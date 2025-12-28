@@ -110,6 +110,9 @@ class ModelArgs:
     def create_ref_mesh(self) -> Mesh:
         return self._create_mesh(self.ref_mesh_shape)
 
+    def remove_binary_tre(self):
+        pass
+
     def create_rollout_mesh(self) -> Mesh:
         if self.rollout_mesh_shape is None:
             return self._create_mesh(self.actor_mesh_shape)

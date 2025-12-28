@@ -43,6 +43,7 @@ dependencies = [
   "gcsfs>=2025.10.0",
   "orbax>=0.1.9",
   "torch>=2.9.1",
+  "draccus>=0.11.5",
 ]
 
 [project.optional-dependencies]
