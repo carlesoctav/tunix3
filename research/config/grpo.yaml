@@ -1,0 +1,89 @@
+# GRPO Training Config
+# For training with online rollouts and group relative advantage estimation
+
+exp_name: grpo-gsm8k
+project: tunix-rl-grpo
+
+model_args:
+  model_family: Gemma3
+  model_name: gemma3-1b-it  # Note: gemma3 not gemma-3 (for ModelConfig method name)
+  model_id: google/gemma-3-1b-it
+  hf_tokenizer_path: google/gemma-3-1b-it
+  mesh_axis_names: [fsdp, tp]
+  actor_mesh_shape: [4, 1]
+  ref_mesh_shape: [4, 1]
+  rollout_mesh_shape: [4, 1]
+  remat: none
+  rng_seed: 42
+  # Reference model (can use same as actor or larger model)
+  ref_model_name: null  # Uses actor model if null
+  ref_model_id: null
+  ref_model_source: null
+  model_source: huggingface
+  lora_config:
+    rank: 16
+    alpha: 16.0
+    module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
+
+training_args:
+  train_micro_batch_size: 4
+  rollout_micro_batch_size: null
+  eval_every_n_steps: 10
+  checkpoint_root_directory: gs://carles-git-good/tunix
+  log_dir: /mnt/carles/logs
+  flush_every_n_steps: 20
+  checkpointing_options:
+    save_interval_steps: 100
+    max_to_keep: 4
+  optimizer_config:
+    opt_type: adamw
+    peak_value: 3e-6
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    warmup_steps: null
+    decay_steps: null
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0.1
+    max_grad_norm: 0.1
+    schedule_type: warmup_cosine_decay_schedule
+
+rollout_args:
+  max_tokens_to_generate: 768
+  max_prompt_length: 256
+  temperature: 0.9
+  top_p: 1.0
+  top_k: 50
+  eos_tokens: [1, 106]
+
+grpo_args:
+  algo_variant: grpo
+  advantage_estimator: grpo
+  policy_loss_fn: grpo
+  loss_agg_mode: sequence-mean-token-mean
+  loss_algo: grpo
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.04
+  epsilon: 0.2
+
+data_args:
+  sources:
+    - path: openai/gsm8k
+      name: main
+      prompt_column: question
+      ground_truth_column: answer
+  tokenizer_path: google/gemma-3-1b-it
+  chat_template_path: ./template/gemma_think.jinja
+  max_prompt_len: 256
+  num_proc: 4
+  step: 233
+
+reward_config:
+  use_math_reward: true
+  verl_compatible: true
+
+batch_size: 32
+rollout_engine: vanilla
+offload_to_cpu: false

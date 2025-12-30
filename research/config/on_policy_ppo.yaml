@@ -1,0 +1,78 @@
+# On-Policy (GRPO-style) Training Config
+# For training with online rollouts and advantage estimation
+
+exp_name: on-policy-gsm8k-ppo-v1
+project: tunix-rl-on-policy
+
+model_args:
+  model_family: Gemma3
+  model_name: gemma3-1b-it  # Note: gemma3 not gemma-3 (for ModelConfig method name)
+  model_id: google/gemma-3-1b-it
+  hf_tokenizer_path: google/gemma-3-1b-it
+  mesh_axis_names: [fsdp, tp]
+  actor_mesh_shape: [4, 1]
+  ref_mesh_shape: [4, 1]
+  rollout_mesh_shape: [1, 4]
+  remat: none
+  rng_seed: 42
+  # Reference model (larger teacher for reward/advantage)
+  ref_model_name: gemma3-4b-it  # Note: gemma3 not gemma-3
+  ref_model_id: google/gemma-3-4b-it
+  ref_model_source: huggingface
+  model_source: huggingface
+  lora_config:
+    rank: 16
+    alpha: 16.0
+    module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
+
+training_args:
+  train_micro_batch_size: 4
+  rollout_micro_batch_size: null
+  eval_every_n_steps: 10
+  checkpoint_root_directory: gs://carles-git-good/tunix
+  log_dir: /mnt/carles/logs
+  flush_every_n_steps: 20
+  checkpointing_options:
+    save_interval_steps: 100
+    max_to_keep: 4
+  optimizer_config:
+    opt_type: adamw
+    peak_value: 5e-6
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    warmup_steps: null
+    decay_steps: null
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0.0
+    max_grad_norm: 0.1
+    schedule_type: warmup_cosine_decay_schedule
+
+rollout_args:
+  max_tokens_to_generate: 1024
+  max_prompt_length: 256
+  temperature: 1.0
+  top_p: 1.0
+  top_k: 50
+  eos_tokens: [1, 106]
+
+on_policy_args:
+  num_generations: 2
+  num_iterations: 1
+
+data_args:
+  sources:
+    - path: openai/gsm8k
+      name: main
+      prompt_column: question
+      ground_truth_column: answer
+  tokenizer_path: google/gemma-3-1b-it
+  chat_template_path: null
+  max_prompt_len: 256
+  num_proc: 4
+  step: 233
+
+batch_size: 32
+rollout_engine: vanilla
+offload_to_cpu: false

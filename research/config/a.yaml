@@ -2,7 +2,7 @@
 # Based on: "Mitigating Forgetting in LLM Fine-Tuning via Low-Perplexity Token Learning"
 # arXiv:2501.14315
 
-exp_name: stm-dolci-math-50k-full-token
+exp_name: dolci-math-50k-stm
 project: tunix-sft  # WandB project name
 
 model_args:
@@ -31,7 +31,7 @@ training_args:
     max_to_keep: 4
   optimizer_config:
     opt_type: adam
-    peak_value: 1e-7
+    peak_value: 1e-6
     init_value: 0.0
     end_value: 0.0
     warmup_ratio: 0.1
@@ -62,5 +62,5 @@ data_args:
   tokenizer_path: google/gemma-3-1b-it 
 
 stm_config:
-  enabled: false
+  enabled: true
   ppl_threshold: 2.5  # Mask tokens with perplexity > 2.5 (paper's optimal)

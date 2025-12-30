@@ -6,6 +6,7 @@ import grain
 from datasets import concatenate_datasets, load_dataset
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
+
 def preprocess(tokenizer, prompt_column, ground_truth_column, x):
     chat = [{"role": "user", "content": x[prompt_column]}]
     prompts = tokenizer.apply_chat_template(
@@ -21,22 +22,26 @@ def filter_length(tokenizer: PreTrainedTokenizer, length, prompt_column, x):
 
 @dataclass
 class HFSource:
-    name: str
-    path: str
+    path: str = ""
+    name: str = ""
     prompt_column: str = "prompt"
     ground_truth_column: str = "ground_truth"
 
 
 @dataclass
 class OnPolicyData:
-    sources: list[HFSource]
-    step: int
-    tokenizer_path: str
+    sources: list[HFSource] = None
+    step: int = 1000
+    tokenizer_path: str = ""
     chat_template_path: str | None = "./template/gemma_think.jinja"
     max_prompt_len: int = 512
     num_proc: int = 8
 
     def __post_init__(self):
+        if self.sources is None:
+            self.sources = []
+        if not self.tokenizer_path:
+            raise ValueError("tokenizer_path is required")
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
         if self.chat_template_path:
             self.tokenizer.chat_template = open(self.chat_template_path).read()

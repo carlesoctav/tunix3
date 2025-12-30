@@ -1,7 +1,7 @@
 """
-On-Policy training pipeline using draccus for configuration.
+GRPO training pipeline using draccus for configuration.
 
-This module provides a structured way to configure and run On-Policy training
+This module provides a structured way to configure and run GRPO training
 with support for multiple datasets, LoRA, and flexible model/training configurations.
 """
 
@@ -10,7 +10,7 @@ import draccus
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from enum import Enum, auto
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,14 +22,15 @@ from flax import nnx
 from huggingface_hub import snapshot_download
 from jax.sharding import Mesh
 from metrax.logging import WandbBackend
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from research.on_policy import OnPolicyConfig, OnPolicyLearner
 from research.on_policy_data import HFSource, OnPolicyData
 from tunix.cli.utils import model as cli_model_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
+from tunix.utils import math_rewards
 
 load_dotenv()
 
@@ -335,17 +336,31 @@ class RolloutArgs:
 
 
 @dataclass
-class OnPolicyArgs:
-    """On-policy algorithm configuration."""
+class GRPOArgs:
+    """GRPO algorithm configuration."""
 
-    num_generations: int = 1
+    algo_variant: str = "grpo"
+    advantage_estimator: str = "grpo"
+    policy_loss_fn: str = "grpo"
+    loss_agg_mode: str = "sequence-mean-token-mean"
+    loss_algo: str = "grpo"
+    num_generations: int = 2
     num_iterations: int = 1
+    beta: float = 0.04
+    epsilon: float = 0.2
 
-    def make(self) -> OnPolicyConfig:
-        """Create OnPolicyConfig."""
-        return OnPolicyConfig(
+    def make(self) -> grpo_learner.GRPOConfig:
+        """Create GRPOConfig."""
+        return grpo_learner.GRPOConfig(
+            algo_variant=self.algo_variant,
+            advantage_estimator=self.advantage_estimator,
+            policy_loss_fn=self.policy_loss_fn,
+            loss_agg_mode=self.loss_agg_mode,
+            loss_algo=self.loss_algo,
             num_generations=self.num_generations,
             num_iterations=self.num_iterations,
+            beta=self.beta,
+            epsilon=self.epsilon,
         )
 
 
@@ -361,7 +376,7 @@ class DataSourceConfig:
 
 @dataclass
 class DataArgs:
-    """Data configuration for On-Policy training."""
+    """Data configuration for GRPO training."""
 
     sources: list[DataSourceConfig] = field(default_factory=list)
     tokenizer_path: str = "google/gemma-3-1b-it"
@@ -396,23 +411,32 @@ class DataArgs:
 
 
 @dataclass
-class Args:
-    """Complete On-Policy training arguments."""
+class RewardConfig:
+    """Reward function configuration."""
 
-    exp_name: str = "on-policy-experiment"
+    use_math_reward: bool = True
+    verl_compatible: bool = True
+
+
+@dataclass
+class Args:
+    """Complete GRPO training arguments."""
+
+    exp_name: str = "grpo-experiment"
     project: str = "tunix-rl"
     batch_size: int = 4
     model_args: ModelArgs = field(default_factory=ModelArgs)
     training_args: TrainingArgs = field(default_factory=TrainingArgs)
     rollout_args: RolloutArgs = field(default_factory=RolloutArgs)
-    on_policy_args: OnPolicyArgs = field(default_factory=OnPolicyArgs)
+    grpo_args: GRPOArgs = field(default_factory=GRPOArgs)
     data_args: DataArgs = field(default_factory=DataArgs)
+    reward_config: RewardConfig = field(default_factory=RewardConfig)
     rollout_engine: str = "vanilla"
     offload_to_cpu: bool = False
 
 
 class Pipeline:
-    """On-Policy Training Pipeline."""
+    """GRPO Training Pipeline."""
 
     def __init__(self, args: Args):
         self.args = args
@@ -435,7 +459,7 @@ class Pipeline:
         """Create cluster configuration."""
         actor_mesh = self.args.model_args.create_actor_mesh()
         rollout_mesh = self.args.model_args.create_rollout_mesh()
-        reference_mesh = actor_mesh
+        reference_mesh = self.args.model_args.create_ref_mesh()
 
         role_to_mesh = {
             rl_cluster_lib.Role.ACTOR: actor_mesh,
@@ -467,10 +491,31 @@ class Pipeline:
             cluster_config=cluster_config,
         )
 
+    def _create_reward_fns(self) -> list[Callable]:
+        """Create reward functions based on configuration."""
+        reward_fns = []
+
+        if self.args.reward_config.use_math_reward:
+            if self.args.reward_config.verl_compatible:
+
+                def math_reward_fn(prompts, completions, reward_model, **kwargs):
+                    del prompts, kwargs
+                    ground_truths = reward_model["ground_truth"]
+                    return [
+                        math_rewards.compute_score(c, gt)
+                        for c, gt in zip(completions, ground_truths)
+                    ]
+
+                reward_fns.append(math_reward_fn)
+            else:
+                reward_fns.append(math_rewards.compute_score)
+
+        return reward_fns
+
     def run(self):
         """Run the training pipeline."""
         print(f"\n{'=' * 60}")
-        print(f"On-Policy Training: {self.args.exp_name}")
+        print(f"GRPO Training: {self.args.exp_name}")
         print(f"{'=' * 60}\n")
 
         print("Loading datasets...")
@@ -483,7 +528,7 @@ class Pipeline:
             config = asdict(self.args)
             return WandbBackend(self.args.project, self.args.exp_name, config=config)
 
-        step = self.args.data_args.step * self.args.on_policy_args.num_iterations
+        step = self.args.data_args.step * self.args.grpo_args.num_iterations
 
         print(f"Training steps: {step}")
         print(f"Checkpoint directory: {self.args.exp_name}")
@@ -495,10 +540,13 @@ class Pipeline:
         print("Loading models...")
         rl_cluster = self._create_rl_cluster(training_config)
 
-        learner = OnPolicyLearner(
+        reward_fns = self._create_reward_fns()
+        print(f"Using {len(reward_fns)} reward function(s)")
+
+        learner = grpo_learner.GRPOLearner(
             rl_cluster=rl_cluster,
-            reward_fns=[],
-            algo_config=self.args.on_policy_args.make(),
+            reward_fns=reward_fns,
+            algo_config=self.args.grpo_args.make(),
         )
         mesh = self.args.model_args.create_actor_mesh()
 
@@ -509,13 +557,13 @@ class Pipeline:
             rl_cluster.close()
 
         print(f"\n{'=' * 60}")
-        print("On-Policy Training completed!")
+        print("GRPO Training completed!")
         print(f"{'=' * 60}\n")
 
 
 @draccus.wrap()
 def main(cfg: Args):
-    """Entry point for On-Policy training."""
+    """Entry point for GRPO training."""
     pipeline = Pipeline(cfg)
     pipeline.run()
 

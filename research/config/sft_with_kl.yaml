@@ -1,0 +1,70 @@
+# SFT with KL Regularization Training Config
+# Prevents catastrophic forgetting by adding KL penalty to keep
+# fine-tuned model close to reference (base) model
+
+exp_name: sft-kl-gemma2-2b
+project: tunix-sft-kl
+
+model_args:
+  model_family: Gemma2
+  model_name: gemma2-2b-it
+  model_id: google/gemma-2-2b-it
+  hf_tokenizer_path: google/gemma-2-2b-it
+  mesh_axis_names: [fsdp, tp]
+  mesh_shape: [4, 1]
+  remat: NONE
+  rng_seed: 42
+  lora_config:
+    rank: 16
+    alpha: 32.0
+    module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
+
+training_args:
+  max_steps: 1000
+  eval_every_n_steps: 100
+  gradient_accumulation_steps: 8
+  checkpoint_root_directory: gs://carles-git-good/tunix-sft
+  log_dir: /mnt/carles/logs
+  flush_every_n_steps: 20
+  checkpointing_options:
+    save_interval_steps: 200
+    max_to_keep: 4
+  optimizer_config:
+    opt_type: adamw
+    peak_value: 2e-4
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    warmup_steps: null
+    decay_steps: null
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+    schedule_type: warmup_cosine_decay_schedule
+
+data_args:
+  tokenizer_path: google/gemma-2-2b-it
+  chat_template_path: null
+  path: allenai/tulu-3-sft-mixture
+  name: null
+  split: train
+  eval_split: null
+  split_ratio: 0.05
+  max_seq_length: 2048
+  num_train_examples: 10000
+  num_eval_examples: 500
+  prompt_column: messages
+  answer_column: null
+  batch_size: 1
+  shuffle: true
+  shuffle_seed: 42
+  epochs: 3
+
+# KL Regularization Config
+# Based on: http://joschu.net/blog/kl-approx.html
+kl_config:
+  enabled: true
+  kl_coef: 0.1  # Weight for KL penalty
+  kl_temperature: 1.0  # Temperature for reference distribution
+  kl_estimator: k3  # 'k1' (-log r) or 'k3' ((r-1) - log r, more stable)

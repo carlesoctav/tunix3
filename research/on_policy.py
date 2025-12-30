@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from absl import logging
 import dataclasses
-from typing import Iterable, List, Sequence, TypeVar, cast, Any, Mapping
+from typing import List, Sequence, TypeVar, Any
 
 import flax
 import jax
@@ -116,7 +116,6 @@ def on_policy_loss_fn(
         train_example.completion_ids,
         train_example.completion_mask,
     )
-
     per_token_logps = common.compute_per_token_logps(
         model,
         prompt_tokens=train_example.prompt_ids,
@@ -127,8 +126,6 @@ def on_policy_loss_fn(
         return_logits=False,
     )
 
-    per_token_logps = cast(jax.Array, per_token_logps)
-
     if train_example.old_per_token_logps is None:
         old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
     else:
@@ -137,16 +134,27 @@ def on_policy_loss_fn(
     log_ratio = per_token_logps - old_per_token_logps
     ratio = jnp.exp(log_ratio)
 
-    advantages = train_example.advantages
+    advantages = train_example.advantages  # [B*G, seq_len]
 
-    # Simple importance sampling without clipping
-    per_token_loss = -(ratio * advantages)
+    # PPO Clipping
+    clip_eps = 0.2
+    surr1 = ratio * advantages
+    surr2 = jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
 
-    loss = common.aggregate_loss(
-        per_token_loss, completion_mask, "sequence-mean-token-mean"
-    )
+    per_token_loss = -jnp.minimum(surr1, surr2)  # [B*G, seq_len]
 
-    return loss, {}
+    loss = common.aggregate_loss(per_token_loss, completion_mask, "token-mean")  # (,)
+
+    metrics = {
+        "ppo/ratio_mean": (ratio * completion_mask).sum()
+        / (completion_mask.sum() + 1e-8),
+        "ppo/clip_fraction": (
+            (ratio < 1.0 - clip_eps) | (ratio > 1.0 + clip_eps) * completion_mask
+        ).sum()
+        / (completion_mask.sum() + 1e-8),
+    }
+
+    return loss, metrics
 
 
 class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
@@ -191,25 +199,22 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
                 "algo_config": self.algo_config,
             }
 
-        # Cast to Any to bypass strict type checking
-        self.rl_cluster.actor_trainer.with_gen_model_input_fn(
-            cast(Any, gen_model_input)
-        )  # type: ignore
+        self.rl_cluster.actor_trainer.with_gen_model_input_fn(gen_model_input)
 
     def _generate_and_compute_advantage(
         self,
         training_input: TrainingInputT,
         mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
     ) -> TrainExample:
-        # Cast to list to satisfy type checker
-        prompts = cast(List[str], training_input["prompts"])
-        training_input["prompts"] = list(prompts)  # type: ignore
+        # pad_value = self.rl_cluster.rollout.pad_id()
+        # eos_value = self.rl_cluster.rollout.eos_id()
+        eos_value = 106
+        pad_value = 0
 
-        pad_value = self.rl_cluster.rollout.pad_id()
-        eos_value = self.rl_cluster.rollout.eos_id()
+        rollout_micro_batch_size = self._rollout_micro_batch_size
+        compute_logps_micro_batch_size = self._compute_logps_micro_batch_size
 
-        rollout_micro_batch_size = cast(int, self._rollout_micro_batch_size)
-        compute_logps_micro_batch_size = cast(int, self._compute_logps_micro_batch_size)
+        prompts = list(training_input["prompts"])
 
         # 1. Generate
         rollout_output = self.rl_cluster.generate(
@@ -222,7 +227,7 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
 
         if self.rl_cluster.global_steps % 1 == 0:
             print("START ============================")
-            logging.info(f"Prompt: {prompts[0]}")
+            print(f"Prompt: {prompts[0]}")
             if "ground_truth" in training_input:
                 gt = training_input["ground_truth"]
                 gt_val = gt[0] if hasattr(gt, "__getitem__") and len(gt) > 0 else gt
@@ -240,6 +245,7 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
 
         devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
         with self.rl_cluster.perf.span("refer_inference", devices):
+            # [B*G, T]
             ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
                 prompt_tokens=prompt_ids,
                 completion_tokens=completion_ids,
@@ -261,6 +267,7 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
                 ),
             )
 
+<<<<<<< HEAD
         # 3. Compute Rewards
         ref_logps = cast(jax.Array, ref_per_token_logps)
         old_logps = cast(jax.Array, old_per_token_logps)
@@ -275,9 +282,18 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
         # Log metrics for dense rewards
         valid_rewards = rewards * completion_mask
         per_seq_reward = valid_rewards.sum(axis=1)  # [B*G, Seq] -> [B*G, ]
+=======
+        rewards = ref_per_token_logps - old_per_token_logps  # [B*G, seq]
+        valid_rewards = rewards * completion_mask
+        advantages = valid_rewards  # [B*G, seq]
+        per_seq_reward = valid_rewards.sum(axis=1)  # [B*G, Seq] -> [B*G, ]
+        per_seq_reward_mean = per_seq_reward / completion_mask.sum(
+            axis=1
+        )  # [B*G, Seq] -> [B*G, ]
+>>>>>>> cfe6ee1 (save)
 
         # Log completion lengths
-        completion_lengths = completion_mask.sum(axis=-1)
+        completion_lengths = completion_mask.sum(axis=-1)  # [B*G, ]
         self.rl_cluster.buffer_metrics(
             {
                 "completions/mean_length": (np.mean(completion_lengths), np.mean),
@@ -290,12 +306,13 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
         for i, (prompt, completion) in enumerate(zip(prompts, rollout_output.text)):
             self.rl_cluster.buffer_metrics(
                 {
-                    "rewards/sum": (per_seq_reward[i], np.mean),
+                    "rewards/sum_trajectories_mean": (per_seq_reward[i], np.mean),
+                    "rewards/mean_trajectories_mean": (per_seq_reward_mean[i], np.mean),
                 },
                 mode=mode,
             )
 
-        return TrainExample(  # type: ignore
+        return TrainExample(
             prompt_ids=prompt_ids,
             prompt_mask=prompt_mask,
             completion_ids=completion_ids,
@@ -306,7 +323,7 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
         )
 
     def _compute_trajectory_ids(self, example: TrainingInputT, steps: int) -> List[str]:
-        prompts = cast(List[str], example["prompts"])
+        prompts = example["prompts"]
         batch_size = len(prompts) // self.algo_config.num_generations  # type: ignore
         row_offset = steps * batch_size
         row_offsets = np.repeat(
