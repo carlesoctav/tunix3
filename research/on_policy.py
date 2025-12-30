@@ -267,22 +267,6 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
                 ),
             )
 
-<<<<<<< HEAD
-        # 3. Compute Rewards
-        ref_logps = cast(jax.Array, ref_per_token_logps)
-        old_logps = cast(jax.Array, old_per_token_logps)
-
-        rewards = on_policy_reward(
-            old_logps, ref_logps, kl_penalty_coef=self.algo_config.kl_penalty_coef
-        )  # [B*G, seq]
-
-        # 4. Compute Advantages (with per-group centering)
-        advantages = compute_advantages(rewards, self.algo_config.num_generations)
-
-        # Log metrics for dense rewards
-        valid_rewards = rewards * completion_mask
-        per_seq_reward = valid_rewards.sum(axis=1)  # [B*G, Seq] -> [B*G, ]
-=======
         rewards = ref_per_token_logps - old_per_token_logps  # [B*G, seq]
         valid_rewards = rewards * completion_mask
         advantages = valid_rewards  # [B*G, seq]
@@ -290,7 +274,6 @@ class OnPolicyLearner(rl_learner.RLLearner[TOnPolicyConfig]):
         per_seq_reward_mean = per_seq_reward / completion_mask.sum(
             axis=1
         )  # [B*G, Seq] -> [B*G, ]
->>>>>>> cfe6ee1 (save)
 
         # Log completion lengths
         completion_lengths = completion_mask.sum(axis=-1)  # [B*G, ]
