@@ -1,7 +1,7 @@
 # On-Policy (GRPO-style) Training Config
 # For training with online rollouts and advantage estimation
 
-exp_name: on-policy-gsm8k-ppo-v1
+exp_name: on-policy-gsm8k-ppo-think
 project: tunix-rl-on-policy
 
 model_args:

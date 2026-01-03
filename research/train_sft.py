@@ -497,6 +497,11 @@ class DataArgs:
                 elif len(messages) > 0 and not isinstance(messages[0], dict):
                     messages = [{"role": "user", "content": " ".join(messages)}]
 
+            # Prepend <reasoning> tag to assistant messages
+            for msg in messages:
+                if msg.get("role") == "assistant":
+                    msg["content"] = "<reasoning>\n" + msg["content"]
+
             encoded = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,

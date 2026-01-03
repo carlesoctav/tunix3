@@ -2,8 +2,8 @@
 # Based on: "Mitigating Forgetting in LLM Fine-Tuning via Low-Perplexity Token Learning"
 # arXiv:2501.14315
 
-exp_name: stm-dolci-250K-3
-project: tunix-sft  # WandB project name
+exp_name: dolci-sft-cot-en-no-tools-1
+project: tunix-sft-cot-en-no-tools  # WandB project name
 
 model_args:
   model_family: Gemma3
@@ -12,7 +12,7 @@ model_args:
   hf_tokenizer_path: google/gemma-3-1b-it
   mesh_axis_names: [fsdp, tp]
   mesh_shape: [4, 1]
-  remat: BLOCK  # Enable gradient checkpointing to reduce memory usage
+  remat: BLOCK  
   rng_seed: 42
   lora_config:
     rank: 64
@@ -20,10 +20,10 @@ model_args:
     module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
 
 training_args:
-  max_steps: 7414  # 1 epoch with 90% train split
+  max_steps: 781   #
   eval_every_n_steps: 3000
-  gradient_accumulation_steps: 4  # Effective batch = 8 * 4 = 32
-  checkpoint_root_directory: gs://carles-git-good/tunix-sft
+  gradient_accumulation_steps: 4  
+  checkpoint_root_directory: gs://carles-git-good/sft
   log_dir: /mnt/carles/logs
   flush_every_n_steps: 20
   checkpointing_options:
@@ -31,7 +31,7 @@ training_args:
     max_to_keep: 4
   optimizer_config:
     opt_type: adam
-    peak_value: 3e-5
+    peak_value: 8e-5
     init_value: 0.0
     end_value: 0.0
     warmup_ratio: 0.1
@@ -41,25 +41,25 @@ training_args:
     b2: 0.99
     weight_decay: 0
     max_grad_norm: 1.0
-    schedule_type: warmup_cosine_decay_schedule
+    schedule_type: constant
 
 data_args:
-  path: carlesoctav/gemma3-4b-think-dolci
+  path: carlesoctav/dolci-instruct-test
   name: null
   split: train
   eval_split: null 
-  split_ratio: 0.1  # 10% for eval, 90% for train
+  split_ratio: 0 
   max_seq_length: 4096
   num_train_examples: null
-  num_eval_examples: 1000  # Limit eval to 1000 examples
+  num_eval_examples: 1000  
   prompt_column: prompt
   answer_column: generated
-  batch_size: 8  # Micro batch size per forward pass (effective = 8 * 4 = 32)
+  batch_size: 8
   shuffle: true
   shuffle_seed: 42
   chat_template_path: ./gemma_think_new.jinja
   tokenizer_path: google/gemma-3-1b-it 
 
 stm_config:
-  enabled: true
+  enabled: false
   ppl_threshold: 2.5  # Mask tokens with perplexity > 2.5 (paper's optimal)

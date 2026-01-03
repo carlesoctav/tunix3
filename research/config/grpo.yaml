@@ -12,7 +12,7 @@ model_args:
   mesh_axis_names: [fsdp, tp]
   actor_mesh_shape: [4, 1]
   ref_mesh_shape: [4, 1]
-  rollout_mesh_shape: [4, 1]
+  rollout_mesh_shape: [1, 4]
   remat: none
   rng_seed: 42
   # Reference model (can use same as actor or larger model)
@@ -47,7 +47,7 @@ training_args:
     b2: 0.99
     weight_decay: 0.1
     max_grad_norm: 0.1
-    schedule_type: warmup_cosine_decay_schedule
+    schedule_type: constant
 
 rollout_args:
   max_tokens_to_generate: 768
@@ -65,7 +65,7 @@ grpo_args:
   loss_algo: grpo
   num_generations: 2
   num_iterations: 1
-  beta: 0.04
+  beta: 0.0
   epsilon: 0.2
 
 data_args:
@@ -75,14 +75,13 @@ data_args:
       prompt_column: question
       ground_truth_column: answer
   tokenizer_path: google/gemma-3-1b-it
-  chat_template_path: ./template/gemma_think.jinja
+  chat_template_path: null 
   max_prompt_len: 256
   num_proc: 4
   step: 233
 
 reward_config:
-  use_math_reward: true
-  verl_compatible: true
+  reward_type: gsm8k
 
 batch_size: 32
 rollout_engine: vanilla

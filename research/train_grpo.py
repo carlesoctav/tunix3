@@ -30,7 +30,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
-from tunix.utils import math_rewards
+from research.reward import gsm8k as gsm8k_reward
 
 load_dotenv()
 
@@ -414,8 +414,7 @@ class DataArgs:
 class RewardConfig:
     """Reward function configuration."""
 
-    use_math_reward: bool = True
-    verl_compatible: bool = True
+    reward_type: str = "gsm8k"  # "gsm8k" or "math"
 
 
 @dataclass
@@ -495,20 +494,8 @@ class Pipeline:
         """Create reward functions based on configuration."""
         reward_fns = []
 
-        if self.args.reward_config.use_math_reward:
-            if self.args.reward_config.verl_compatible:
-
-                def math_reward_fn(prompts, completions, reward_model, **kwargs):
-                    del prompts, kwargs
-                    ground_truths = reward_model["ground_truth"]
-                    return [
-                        math_rewards.compute_score(c, gt)
-                        for c, gt in zip(completions, ground_truths)
-                    ]
-
-                reward_fns.append(math_reward_fn)
-            else:
-                reward_fns.append(math_rewards.compute_score)
+        if self.args.reward_config.reward_type == "gsm8k":
+            reward_fns.append(gsm8k_reward.gsm8k_reward_fn)
 
         return reward_fns
 
