@@ -1,5 +1,5 @@
 {{ bos_token }}
-{%- set first_user_prefix = 'A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning process and answer are enclosed within <reasoning> </reasoning> and <answer> </answer> tags, respectively, i.e., <reasoning> reasoning process here </reasoning><answer> answer here </answer>.\n\n' -%}
+{%- set first_user_prefix = 'Think through your approach in <reasoning></reasoning> tags, then provide your complete response in <answer></answer> tags. For creative tasks, briefly plan in reasoning, then write the full creative output in answer.\n\n' -%}
 {%- set loop_messages = messages -%}
 {%- for message in loop_messages -%}
     {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}
@@ -49,6 +49,5 @@
     {%- endif -%}
 {%- endfor -%}
 {%- if add_generation_prompt -%}
-    {{'<start_of_turn>model\n'}}
+    {{'<start_of_turn>model\n<reasoning>\n'}}
 {%- endif -%}
-

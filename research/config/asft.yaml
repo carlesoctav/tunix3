@@ -1,0 +1,61 @@
+exp_name: 27b-generated-Dolci-Instruct-ASFT-No-Tools-rank-64-1
+project: tunix-final
+
+model_args:
+  model_family: Gemma3
+  model_name: gemma3-1b-it
+  model_id: google/gemma-3-1b-it
+  hf_tokenizer_path: google/gemma-3-1b-it
+  mesh_axis_names: [fsdp, tp]
+  mesh_shape: [4, 1]
+  remat: BLOCK  
+  rng_seed: 42
+  lora_config:
+    rank: 64
+    alpha: 64.0
+    module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
+
+training_args:
+  max_steps: 11250
+  eval_every_n_steps: 3000
+  gradient_accumulation_steps: 8  
+  checkpoint_root_directory: gs://carles-git-good/tunix-final
+  log_dir: /mnt/carles/logs
+  flush_every_n_steps: 20
+  checkpointing_options:
+    save_interval_steps: 500
+    max_to_keep: 4
+  optimizer_config:
+    opt_type: adam
+    peak_value: 2e-4
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.03
+    warmup_steps: null
+    decay_steps: null
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0
+    max_grad_norm: 1.0
+    schedule_type: warmup_cosine_decay_schedule 
+data_args:
+  path: carlesoctav/27b-generated-Dolci-Instruct-SFT-No-Tools 
+  name: null
+  split: train
+  eval_split: null 
+  split_ratio: 0 
+  max_seq_length: 4096
+  num_train_examples: null
+  num_eval_examples: null  
+  prompt_column: prompt
+  answer_column: generated
+  batch_size: 8
+  shuffle: true
+  shuffle_seed: 42
+  chat_template_path: ./gemma_think_new.jinja
+  tokenizer_path: google/gemma-3-1b-it 
+
+asft_config:
+  use_dft_weighting: true
+  kl_weight: 0.1
+  kl_direction: REVERSE
