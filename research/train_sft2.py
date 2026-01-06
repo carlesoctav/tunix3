@@ -1,7 +1,6 @@
 import dataclasses
 import draccus
 import os
-import warnings
 from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
 from functools import partial
@@ -18,11 +17,6 @@ from metrax.logging import WandbBackend
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from termcolor import colored
 
-# Suppress overflow warning from perplexity calculation (expected with sum loss)
-warnings.filterwarnings(
-    "ignore", message="overflow encountered in exp", category=RuntimeWarning
-)
-
 
 from tunix.cli.utils import model as cli_model_lib
 from tunix.sft import metrics_logger
@@ -31,17 +25,17 @@ from tunix.sft import utils
 import jax.numpy as jnp
 
 
-def sum_loss_fn(
+def mean_loss_fn_with_token_count(
     model: nnx.Module,
     input_tokens: jax.Array,
     input_mask: jax.Array,
     positions: jax.Array,
     attention_mask: jax.Array,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Loss function using sum instead of mean for proper grad accumulation.
+    """Standard mean loss with token count tracking.
 
     Returns:
-        Tuple of (loss, aux) where aux contains num_tokens for this batch.
+        Tuple of (mean_loss, aux) where aux contains num_tokens for monitoring.
     """
     logits, _ = model(input_tokens, positions, None, attention_mask)
 
@@ -59,9 +53,8 @@ def sum_loss_fn(
     # Count number of tokens (non-zero mask entries)
     num_tokens = jnp.sum(target_mask)
 
-    # Return the sum of negative log likelihood (NLL) loss.
-    # User will adjust LR by 1/(avg tokens per accumulated batch) in config.
-    loss = -jnp.sum(jax.nn.log_softmax(logits) * one_hot)
+    # Standard mean NLL loss
+    loss = -jnp.sum(jax.nn.log_softmax(logits) * one_hot) / jnp.maximum(num_tokens, 1)
     return loss, {"num_tokens": num_tokens}
 
 
@@ -100,12 +93,7 @@ def apply_chat_template_map(
             messages,
             tokenize=True,
             add_generation_prompt=False,
-            return_assistant_tokens_mask=True,
             return_tensors="np",
-            truncation=True,
-            max_length=max_seq_length,
-            padding="max_length",
-            return_dict=True,
         )
         all_input_tokens.append(encoded["input_ids"][0])
         all_input_masks.append(np.array(encoded["assistant_masks"][0], dtype=np.int32))
@@ -171,7 +159,7 @@ def visualize_batch(
     print("TOKENIZATION VISUALIZATION (Green=loss, Yellow=no loss/padding)")
     print("=" * 80)
 
-    batch_tokens = batch.input_tokens 
+    batch_tokens = batch.input_tokens
     batch_masks = batch.input_mask
 
     for i in range(min(num_examples, len(batch_tokens))):
@@ -601,17 +589,12 @@ class Args:
 
 
 class TokenTrackingTrainer(peft_trainer.PeftTrainer):
-    """PeftTrainer subclass that tracks token counts."""
+    """PeftTrainer subclass that tracks token counts for monitoring."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._tokens_in_grad_acc_window = (
-            0  # tokens accumulated in current grad acc window
-        )
-        self._loss_in_grad_acc_window = (
-            0.0  # loss accumulated in current grad acc window
-        )
-        self._total_tokens = 0  # cumulative tokens across all training
+        self._tokens_in_grad_acc_window = 0
+        self._total_tokens = 0
 
     def _post_process_train_step(self, aux: dict | None) -> None:
         """Accumulate token counts from aux data."""
@@ -625,26 +608,10 @@ class TokenTrackingTrainer(peft_trainer.PeftTrainer):
         self._tokens_in_grad_acc_window += num_tokens
         self._total_tokens += num_tokens
 
-        # Accumulate loss from buffered metrics
-        if (
-            self._buffered_train_metrics is not None
-            and self._buffered_train_metrics.losses
-        ):
-            last_loss = self._buffered_train_metrics.losses[-1]
-            if isinstance(last_loss, jax.Array):
-                last_loss = float(jax.device_get(last_loss))
-            self._loss_in_grad_acc_window += last_loss
-
         grad_acc_steps = self.config.get_with_default("gradient_accumulation_steps", 1)
 
-        # Check if we hit the grad accumulation boundary
+        # Log at grad accumulation boundary
         if self._iter_steps % grad_acc_steps == (grad_acc_steps - 1):
-            # Compute mean token loss
-            mean_token_loss = self._loss_in_grad_acc_window / max(
-                self._tokens_in_grad_acc_window, 1
-            )
-
-            # Log tokens for this grad acc window
             if self._buffered_train_metrics is not None:
                 self._buffered_train_metrics.additional_metrics["tokens_per_update"] = (
                     [self._tokens_in_grad_acc_window],
@@ -652,15 +619,9 @@ class TokenTrackingTrainer(peft_trainer.PeftTrainer):
                 )
                 self._buffered_train_metrics.additional_metrics["total_tokens"] = (
                     [self._total_tokens],
-                    lambda x: x[-1],  # just take the latest value
-                )
-                self._buffered_train_metrics.additional_metrics["mean_token_loss"] = (
-                    [mean_token_loss],
                     lambda x: x[-1],
                 )
-            # Reset window counters
             self._tokens_in_grad_acc_window = 0
-            self._loss_in_grad_acc_window = 0.0
 
 
 class Pipeline:
@@ -729,7 +690,7 @@ class Pipeline:
         )
 
         trainer = trainer.with_gen_model_input_fn(self._gen_model_input_fn)
-        trainer = trainer.with_loss_fn(sum_loss_fn, has_aux=True)
+        trainer = trainer.with_loss_fn(mean_loss_fn_with_token_count, has_aux=True)
         print(f"\nStarting training for {self.args.training_args.max_steps} steps...")
         mesh = self.args.model_args.create_mesh()
 

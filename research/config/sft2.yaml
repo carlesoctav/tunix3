@@ -1,5 +1,5 @@
-exp_name: 27b-generated-Dolci-Instruct-SFT-No-Tools-rank-256-5
-project: tunix-final-sft
+exp_name: 4b-generated-Dolci-Instruct-SFT-No-Tools-rank-256-test-lr-
+project: tunix-finale
 
 model_args:
   model_family: Gemma3
@@ -16,18 +16,18 @@ model_args:
     module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
 
 training_args:
-  max_steps: 11250
+  max_steps: 21718
   eval_every_n_steps: 3000
-  gradient_accumulation_steps: 1  
+  gradient_accumulation_steps: 4  
   checkpoint_root_directory: gs://carles-git-good/tunix-final-sft
   log_dir: /mnt/carles/logs
   flush_every_n_steps: 20
   checkpointing_options:
-    save_interval_steps: 2000
+    save_interval_steps: 5000
     max_to_keep: 4
   optimizer_config:
     opt_type: adam
-    peak_value: 5e-5
+    peak_value: 1e-6
     init_value: 0.0
     end_value: 0.0
     warmup_ratio: 0.03
@@ -39,17 +39,17 @@ training_args:
     max_grad_norm: 1.0
     schedule_type: warmup_cosine_decay_schedule 
 data_args:
-  path: carlesoctav/27b-generated-Dolci-Instruct-SFT-No-Tools 
+  path: carlesoctav/filtered-2048-4b-generated-Dolci-Instruct-SFT-No-Tools 
   name: null
   split: train
   eval_split: null 
   split_ratio: 0 
-  max_seq_length: 4096
+  max_seq_length: 2048
   num_train_examples: null
   num_eval_examples: null  
   prompt_column: prompt
   answer_column: generated
-  batch_size: 16
+  batch_size: 8
   shuffle: true
   shuffle_seed: 42
   chat_template_path: ./gemma_think_new.jinja
