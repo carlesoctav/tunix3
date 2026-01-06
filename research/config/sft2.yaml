@@ -1,4 +1,4 @@
-exp_name: 4b-generated-Dolci-Instruct-SFT-No-Tools-rank-256-test-lr-
+exp_name: 4b-generated-Dolci-Instruct-SFT-No-Tools-rank-256-lr-1e6
 project: tunix-finale
 
 model_args:
@@ -37,7 +37,7 @@ training_args:
     b2: 0.99
     weight_decay: 0
     max_grad_norm: 1.0
-    schedule_type: warmup_cosine_decay_schedule 
+    schedule_type: constant 
 data_args:
   path: carlesoctav/filtered-2048-4b-generated-Dolci-Instruct-SFT-No-Tools 
   name: null
@@ -54,4 +54,3 @@ data_args:
   shuffle_seed: 42
   chat_template_path: ./gemma_think_new.jinja
   tokenizer_path: google/gemma-3-1b-it 
-
