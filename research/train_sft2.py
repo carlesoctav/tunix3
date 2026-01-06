@@ -171,8 +171,8 @@ def visualize_batch(
     print("TOKENIZATION VISUALIZATION (Green=loss, Yellow=no loss/padding)")
     print("=" * 80)
 
-    batch_tokens = batch["input_tokens"]
-    batch_masks = batch["input_mask"]
+    batch_tokens = batch.input_tokens 
+    batch_masks = batch.input_mask
 
     for i in range(min(num_examples, len(batch_tokens))):
         tokens = batch_tokens[i].tolist()
@@ -445,113 +445,148 @@ class DataArgs:
     """Data configuration for HuggingFace datasets."""
 
     tokenizer_path: str
-    chat_template_path: str | None
-    path: str
+    chat_template_path: str | None = "./gemma_think_new.jinja"
+    path: str = "carlesoctav/4b-generated-Dolci-Instruct-SFT-No-Tools"
     name: str | None = None
     split: str = "train"
-    eval_split: str | None = None
+    eval_split: str | None = "test"
+    split_ratio: float = 0.05
     max_seq_length: int = 2048
     num_train_examples: int | None = None
     num_eval_examples: int | None = None
     prompt_column: str = "prompt"
-    answer_column: str = "generated"
+    answer_column: str | None = "generated"
     batch_size: int = 4
     shuffle: bool = True
     shuffle_seed: int = 42
     epochs: int = 1
-    shuffle_buffer_size: int = 10000
 
     def __post_init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
-        if self.chat_template_path:
-            with open(self.chat_template_path) as f:
-                self.tokenizer.chat_template = f.read()
+        if self.chat_template_path and os.path.exists(self.chat_template_path):
+            self.tokenizer.chat_template = open(self.chat_template_path).read()
 
     def make(self) -> tuple[Iterable, Iterable | None]:
-        """Create train and eval data iterators using .shuffle().batch().map() pipeline."""
         load_kwargs = {"path": self.path, "split": self.split}
         if self.name:
             load_kwargs["name"] = self.name
 
-        # Load as iterable dataset for streaming
-        ds = load_dataset(**load_kwargs, streaming=True)
+        full_ds = load_dataset(**load_kwargs)
 
-        # Create map function with partial
-        map_fn = partial(
-            apply_chat_template_map,
-            tokenizer=self.tokenizer,
-            prompt_column=self.prompt_column,
-            answer_column=self.answer_column,
-            max_seq_length=self.max_seq_length,
-        )
-
-        # Pipeline: shuffle -> batch -> map
         if self.shuffle:
-            ds = ds.shuffle(
-                seed=self.shuffle_seed, buffer_size=self.shuffle_buffer_size
-            )
+            full_ds = full_ds.shuffle(seed=self.shuffle_seed)
 
-        ds = ds.batch(batch_size=self.batch_size)
-        ds = ds.map(map_fn)
+        if self.num_train_examples:
+            full_ds = full_ds.select(range(min(self.num_train_examples, len(full_ds))))
 
-        # Handle epochs by repeating the iterator
-        def training_input_iterator():
-            for _ in range(self.epochs):
-                for batch in ds:
-                    yield peft_trainer.TrainingInput(
-                        input_tokens=batch["input_tokens"],
-                        input_mask=batch["input_mask"],
-                    )
-
-        # Handle eval dataset
-        eval_iter = None
+        eval_ds = None
         if self.eval_split:
             try:
                 eval_load_kwargs = {"path": self.path, "split": self.eval_split}
                 if self.name:
                     eval_load_kwargs["name"] = self.name
-                eval_ds = load_dataset(**eval_load_kwargs, streaming=True)
-                eval_ds = eval_ds.batch(batch_size=self.batch_size)
-                eval_ds = eval_ds.map(map_fn)
-
-                def eval_iterator():
-                    for batch in eval_ds:
-                        yield peft_trainer.TrainingInput(
-                            input_tokens=batch["input_tokens"],
-                            input_mask=batch["input_mask"],
-                        )
-
-                eval_iter = eval_iterator()
+                eval_ds = load_dataset(**eval_load_kwargs)
+                if self.num_eval_examples:
+                    eval_ds = eval_ds.select(
+                        range(min(self.num_eval_examples, len(eval_ds)))
+                    )
             except Exception as e:
                 print(f"Could not load eval split '{self.eval_split}': {e}")
-
-        return training_input_iterator(), eval_iter
-
-    def make_visualization_batch(self) -> dict:
-        """Create a single batch for visualization using next(iter(ds))."""
-        load_kwargs = {"path": self.path, "split": self.split}
-        if self.name:
-            load_kwargs["name"] = self.name
-
-        ds = load_dataset(**load_kwargs, streaming=True)
-
-        if self.shuffle:
-            ds = ds.shuffle(
-                seed=self.shuffle_seed, buffer_size=self.shuffle_buffer_size
+                eval_ds = None
+            train_ds = full_ds
+        elif self.split_ratio > 0:
+            split_result = full_ds.train_test_split(
+                test_size=self.split_ratio, seed=self.shuffle_seed
             )
+            train_ds = split_result["train"]
+            eval_ds = split_result["test"]
+            if self.num_eval_examples:
+                eval_ds = eval_ds.select(
+                    range(min(self.num_eval_examples, len(eval_ds)))
+                )
+            print(f"Split dataset: {len(train_ds)} train, {len(eval_ds)} eval")
+        else:
+            train_ds = full_ds
 
-        map_fn = partial(
-            apply_chat_template_map,
-            tokenizer=self.tokenizer,
-            prompt_column=self.prompt_column,
-            answer_column=self.answer_column,
-            max_seq_length=self.max_seq_length,
-        )
+        if self.epochs > 1:
+            train_ds = train_ds.repeat(self.epochs)
+            print(f"Repeating train dataset for {self.epochs} epochs")
 
-        ds = ds.batch(batch_size=self.batch_size)
-        ds = ds.map(map_fn)
+        train_iter = self._create_data_iterator(train_ds)
+        eval_iter = None
+        if eval_ds is not None:
+            eval_iter = self._create_data_iterator(eval_ds, is_eval=True)
 
-        return next(iter(ds))
+        return train_iter, eval_iter
+
+    def _create_data_iterator(
+        self,
+        dataset,
+        is_eval: bool = False,
+    ) -> Iterable:
+        """Create a data iterator that yields TrainingInput batches."""
+
+        def process_example(example):
+            """Process a single example into tokens."""
+            if self.answer_column is not None:
+                prompt = example[self.prompt_column]
+                answer = example[self.answer_column]
+                messages = [
+                    {"role": "user", "content": str(prompt)},
+                    {"role": "assistant", "content": str(answer)},
+                ]
+            else:
+                messages = example[self.prompt_column]
+                if not isinstance(messages, list):
+                    messages = [{"role": "user", "content": str(messages)}]
+                elif len(messages) > 0 and not isinstance(messages[0], dict):
+                    messages = [{"role": "user", "content": " ".join(messages)}]
+
+            encoded = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_assistant_tokens_mask=True,
+                return_tensors="np",
+                truncation=True,
+                max_length=self.max_seq_length,
+                padding="max_length",
+                return_dict=True,
+            )
+            input_tokens = encoded["input_ids"][0]
+            assistant_mask = np.array(encoded["assistant_masks"][0], dtype=np.int32)
+
+            return input_tokens, assistant_mask
+
+        def batch_generator():
+            """Generate batches of TrainingInput."""
+            batch_tokens = []
+            batch_masks = []
+
+            for example in dataset:
+                try:
+                    input_tokens, assistant_mask = process_example(example)
+                    batch_tokens.append(input_tokens)
+                    batch_masks.append(assistant_mask)
+
+                    if len(batch_tokens) >= self.batch_size:
+                        yield peft_trainer.TrainingInput(
+                            input_tokens=np.stack(batch_tokens),
+                            input_mask=np.stack(batch_masks),
+                        )
+                        batch_tokens = []
+                        batch_masks = []
+                except Exception as e:
+                    print(f"Error processing example: {e}")
+                    continue
+
+            if batch_tokens:
+                yield peft_trainer.TrainingInput(
+                    input_tokens=np.stack(batch_tokens),
+                    input_mask=np.stack(batch_masks),
+                )
+
+        return batch_generator()
 
 
 @dataclass
@@ -664,18 +699,19 @@ class Pipeline:
 
         print("Loading model and tokenizer...")
         model, tokenizer = self._create_model_and_tokenizer()
-
         print("Loading datasets...")
-        # Visualize first batch using next(iter(ds))
-        first_batch = self.args.data_args.make_visualization_batch()
+        train_ds, eval_ds = self.args.data_args.make()
+
+        first_batch = next(train_ds)
+
         print(
-            f"First batch shape: input_tokens={first_batch['input_tokens'].shape}, "
-            f"input_mask={first_batch['input_mask'].shape}"
+            f"First batch shape: input_tokens={first_batch.input_tokens.shape}, "
+            f"input_mask={first_batch.input_mask.shape}"
         )
+
         visualize_batch(first_batch, self.args.data_args.tokenizer, num_examples=2)
 
         # Create actual training iterators
-        train_ds, eval_ds = self.args.data_args.make()
 
         def logging_factory():
             config = asdict(self.args)

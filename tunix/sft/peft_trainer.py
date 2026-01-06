@@ -678,7 +678,6 @@ class PeftTrainer:
               self.model, self.optimizer, train_example
           )
 
-          print(f"DEBUGPRINT[51]: peft_trainer.py:677: aux={aux}")
           current_time = time.perf_counter()
           step_time_delta = current_time - last_step_completion_time
           last_step_completion_time = current_time
