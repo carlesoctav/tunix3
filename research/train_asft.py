@@ -1,18 +1,3 @@
-"""
-ASFT (Adaptive SFT) training pipeline using DistillationTrainer.
-
-This module provides a structured way to configure and run ASFT training,
-which combines DFT (Distillation Fine-Tuning) with KL regularization:
-- DFT: Weights the CE loss by p(correct_token), focusing on tokens the model
-  is already good at.
-- KL regularization: Configurable direction (forward or reverse) to stay close
-  to the base model and prevent catastrophic forgetting.
-
-The teacher model is the base (pre-trained) model, and the student model
-starts as a copy of the teacher but is trained on new data while staying
-close to the teacher's distribution.
-"""
-
 import dataclasses
 import draccus
 import json
@@ -135,11 +120,13 @@ class ASFTStrategy(base_strategy.BaseStrategy):
         kl_weight: float = 0.1,
         use_dft_weighting: bool = True,
         kl_direction: KLDirection = KLDirection.REVERSE,
+        kl_top_k: int | None = None,
     ):
         super().__init__(student_forward_fn, teacher_forward_fn, labels_fn)
         self.kl_weight = kl_weight
         self.use_dft_weighting = use_dft_weighting
         self.kl_direction = kl_direction
+        self.kl_top_k = kl_top_k
 
     def compute_eval_loss(
         self,
@@ -162,10 +149,11 @@ class ASFTStrategy(base_strategy.BaseStrategy):
         label_mask = jnp.sum(labels, axis=-1) > 0  # [batch, seq]
         num_valid = jnp.sum(label_mask) + 1e-8
 
+        student_output = student_output.astype(jnp.float32)
+        teacher_output = teacher_output.astype(jnp.float32)
+
         student_probs = jax.nn.softmax(student_output, axis=-1)
-        student_log_probs = jax.nn.log_softmax(
-            student_output, axis=-1
-        )  # [batch, seq, V]
+        student_log_probs = jax.nn.log_softmax(student_output, axis=-1)
 
         # Per-token cross-entropy loss: CE = -sum(labels * log_probs)
         token_ce_loss = -jnp.sum(labels * student_log_probs, axis=-1)  # [batch, seq]
@@ -179,21 +167,53 @@ class ASFTStrategy(base_strategy.BaseStrategy):
             weighted_ce_loss = token_ce_loss
 
         # KL divergence with configurable direction
-        teacher_probs = jax.nn.softmax(teacher_output, axis=-1)
-        teacher_log_probs = jax.nn.log_softmax(teacher_output, axis=-1)
+        # We optimize to only compute/gather what is needed based on direction
+        if self.kl_top_k is not None:
+            _, top_k_indices = jax.lax.top_k(teacher_output, self.kl_top_k)
 
-        if self.kl_direction == KLDirection.FORWARD:
-            # KL(teacher || student) - standard distillation direction
-            kl_div = optax.kl_divergence(student_log_probs, teacher_probs)
+            def gather_topk(tensor):
+                return jnp.take_along_axis(tensor, top_k_indices, axis=-1)
+
+            if self.kl_direction == KLDirection.FORWARD:
+                # KL(T || S)
+                # Need: Teacher Probs (Target), Student Log Probs (Pred)
+                teacher_probs = jax.nn.softmax(teacher_output, axis=-1)
+                t_probs_k = gather_topk(teacher_probs)
+                s_log_probs_k = gather_topk(student_log_probs)
+
+                # Manual safe KL: sum(p * (log_p - log_q))
+                # Note: optax.kl_divergence(log_p, q) computes sum(q * (log_q - log_p))
+                # For Forward KL we want KL(T||S) = sum(T * (log_T - log_S))
+                # optax.kl_divergence(student_log_probs, teacher_probs) does exactly this.
+                kl_div = optax.kl_divergence(s_log_probs_k, t_probs_k)
+            else:
+                # KL(S || T) = sum S * (log S - log T)
+                # Need: Student Probs (Target), Teacher Log Probs (Pred)
+                teacher_log_probs = jax.nn.log_softmax(teacher_output, axis=-1)
+                t_log_probs_k = gather_topk(teacher_log_probs)
+                s_probs_k = gather_topk(student_probs)
+                kl_div = optax.kl_divergence(t_log_probs_k, s_probs_k)
+
         else:
-            # KL(student || teacher) - reverse KL, mode-seeking
-            kl_div = optax.kl_divergence(teacher_log_probs, student_probs)
+            # Full Vocabulary KL
+            if self.kl_direction == KLDirection.FORWARD:
+                # KL(teacher || student)
+                teacher_probs = jax.nn.softmax(teacher_output, axis=-1)
+                kl_div = optax.kl_divergence(student_log_probs, teacher_probs)
+            else:
+                # KL(student || teacher)
+                teacher_log_probs = jax.nn.log_softmax(teacher_output, axis=-1)
+                kl_div = optax.kl_divergence(teacher_log_probs, student_probs)
+
+        # Add epsilon to avoid any remaining NaN issues
+        # kl_div = jnp.nan_to_num(kl_div, nan=0.0, posinf=0.0, neginf=0.0)
 
         combined_token_loss = weighted_ce_loss + self.kl_weight * kl_div
 
         masked_loss = jnp.where(label_mask, combined_token_loss, 0.0)
         loss = jnp.sum(masked_loss) / num_valid
 
+        # Aux metrics
         masked_kl = jnp.where(label_mask, kl_div, 0.0)
         masked_ce = jnp.where(label_mask, token_ce_loss, 0.0)
         aux = {
@@ -236,11 +256,13 @@ class ASFTConfig:
       If False, use standard CE with KL regularization (SFT+KL).
     - kl_weight: Weight for the KL term.
     - kl_direction: Direction of KL divergence (FORWARD or REVERSE).
+    - kl_top_k: If set, compute KL divergence only on the top-k tokens from the teacher.
     """
 
     use_dft_weighting: bool = True
     kl_weight: float = 0.1
     kl_direction: KLDirection = KLDirection.REVERSE
+    kl_top_k: int | None = None
 
 
 class ModelFamily(Enum):
@@ -352,7 +374,7 @@ class ModelArgs:
         is trained with LoRA or full fine-tuning.
 
         Returns:
-            Tuple of (student_model, teacher_model, tokenizer, mesh)
+            Tuple of (student_model, teacher_model, tokenizer)
         """
         mesh = self.create_mesh()
 
@@ -375,7 +397,7 @@ class ModelArgs:
             print("LoRA applied to student model")
 
         tokenizer = AutoTokenizer.from_pretrained(self.hf_tokenizer_path)
-        return student_model, teacher_model, tokenizer, mesh
+        return student_model, teacher_model, tokenizer
 
 
 @dataclass
@@ -677,18 +699,16 @@ class Pipeline:
         self._student_model = None
         self._teacher_model = None
         self._tokenizer = None
-        self._mesh = None
 
     def _create_models_and_tokenizer(self):
-        """Create and cache models, tokenizer, and mesh."""
+        """Create and cache models and tokenizer."""
         if self._student_model is None:
             (
                 self._student_model,
                 self._teacher_model,
                 self._tokenizer,
-                self._mesh,
             ) = self.args.model_args.make()
-        return self._student_model, self._teacher_model, self._tokenizer, self._mesh
+        return self._student_model, self._teacher_model, self._tokenizer
 
     def _gen_model_input_fn(
         self, x: distillation_trainer.TrainingInput
@@ -714,9 +734,7 @@ class Pipeline:
 
         # Create models and tokenizer
         print("Loading student and teacher models...")
-        student_model, teacher_model, tokenizer, mesh = (
-            self._create_models_and_tokenizer()
-        )
+        student_model, teacher_model, tokenizer = self._create_models_and_tokenizer()
 
         # Create datasets
         print("Loading datasets...")
@@ -787,84 +805,70 @@ class Pipeline:
             # Mask out padding tokens from loss calculation
             return labels * target_mask.astype(labels.dtype)[..., None]
 
-        # Create ASFT strategy
-        print(
-            f"Creating ASFT strategy with kl_weight={self.args.asft_config.kl_weight}, "
-            f"use_dft_weighting={self.args.asft_config.use_dft_weighting}, "
-            f"kl_direction={self.args.asft_config.kl_direction.name}"
-        )
-        strategy = ASFTStrategy(
-            student_forward_fn=model_forward_fn,
-            teacher_forward_fn=model_forward_fn,
-            labels_fn=labels_fn,
-            kl_weight=self.args.asft_config.kl_weight,
-            use_dft_weighting=self.args.asft_config.use_dft_weighting,
-            kl_direction=self.args.asft_config.kl_direction,
-        )
+        # Create mesh for distributed training
+        mesh = self.args.model_args.create_mesh()
 
-        # Set models to appropriate modes
-        teacher_model.eval()
-        student_model.train()
-
-        # Create trainer
-        trainer = distillation_trainer.DistillationTrainer(
-            student_model=student_model,
-            teacher_model=teacher_model,
-            strategy=strategy,
-            optimizer=optimizer,
-            training_config=training_config,
-        ).with_gen_model_input_fn(self._gen_model_input_fn)
-
-        # Debug: Test that strategy returns (loss, aux) correctly
-        print("\nDebug: Testing strategy loss function...")
-        test_batch = first_batch
-        test_inputs = self._gen_model_input_fn(test_batch)
         with mesh:
-            teacher_out = strategy.get_teacher_outputs(teacher_model, test_inputs)
-            test_result = strategy.get_train_loss(
-                student_model, teacher_out, test_inputs
+            print(
+                f"Creating ASFT strategy with kl_weight={self.args.asft_config.kl_weight}, "
+                f"use_dft_weighting={self.args.asft_config.use_dft_weighting}, "
+                f"kl_direction={self.args.asft_config.kl_direction.name}, "
+                f"kl_top_k={self.args.asft_config.kl_top_k}"
             )
-            print(f"  strategy.get_train_loss returned: type={type(test_result)}")
-            if isinstance(test_result, tuple):
-                print(
-                    f"  loss={test_result[0]}, aux_keys={test_result[1].keys() if isinstance(test_result[1], dict) else test_result[1]}"
+            strategy = ASFTStrategy(
+                student_forward_fn=model_forward_fn,
+                teacher_forward_fn=model_forward_fn,
+                labels_fn=labels_fn,
+                kl_weight=self.args.asft_config.kl_weight,
+                use_dft_weighting=self.args.asft_config.use_dft_weighting,
+                kl_direction=self.args.asft_config.kl_direction,
+                kl_top_k=self.args.asft_config.kl_top_k,
+            )
+
+            # Set models to appropriate modes
+            teacher_model.eval()
+            student_model.train()
+
+            # Create trainer
+            trainer = distillation_trainer.DistillationTrainer(
+                student_model=student_model,
+                teacher_model=teacher_model,
+                strategy=strategy,
+                optimizer=optimizer,
+                training_config=training_config,
+            ).with_gen_model_input_fn(self._gen_model_input_fn)
+
+            # Enable aux metrics logging
+            trainer._has_aux = True
+            trainer.clear_jit_cache()
+            aux_buffer: dict[str, list] = {}
+
+            def post_process_train_step(aux: dict[str, jax.Array] | None) -> None:
+                if aux is None:
+                    return
+                for key, value in aux.items():
+                    if key not in aux_buffer:
+                        aux_buffer[key] = []
+                    aux_buffer[key].append(value)
+
+                grad_accum_steps = trainer.config.get_with_default(
+                    "gradient_accumulation_steps", 1
                 )
-            else:
-                print(f"  value={test_result}")
+                if trainer._iter_steps % grad_accum_steps == grad_accum_steps - 1:
+                    if trainer._buffered_train_metrics is not None:
+                        for key, values in aux_buffer.items():
+                            trainer._buffered_train_metrics.additional_metrics[key] = (
+                                values,
+                                lambda v: np.mean([np.array(x) for x in v]),
+                            )
+                    aux_buffer.clear()
 
-        # Enable aux metrics logging - must clear JIT cache after setting
-        trainer._has_aux = True
-        trainer.clear_jit_cache()
-        aux_buffer: dict[str, list] = {}
+            trainer._post_process_train_step = post_process_train_step
 
-        def post_process_train_step(aux: dict[str, jax.Array] | None) -> None:
-            if aux is None:
-                return
-            for key, value in aux.items():
-                if key not in aux_buffer:
-                    aux_buffer[key] = []
-                aux_buffer[key].append(value)
-
-            grad_accum_steps = trainer.config.get_with_default(
-                "gradient_accumulation_steps", 1
+            # Run training
+            print(
+                f"\nStarting ASFT training for {self.args.training_args.max_steps} steps..."
             )
-            if trainer._iter_steps % grad_accum_steps == grad_accum_steps - 1:
-                if trainer._buffered_train_metrics is not None:
-                    for key, values in aux_buffer.items():
-                        trainer._buffered_train_metrics.additional_metrics[key] = (
-                            values,
-                            lambda v: np.mean([np.array(x) for x in v]),
-                        )
-                aux_buffer.clear()
-
-        trainer._post_process_train_step = post_process_train_step
-
-        # Run training
-        print(
-            f"\nStarting ASFT training for {self.args.training_args.max_steps} steps..."
-        )
-
-        with mesh:
             trainer.train(train_ds, eval_ds)
 
         print(f"\n{'=' * 60}")

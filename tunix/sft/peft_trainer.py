@@ -649,7 +649,9 @@ class PeftTrainer:
             break
 
           train_example = self._prepare_inputs(train_example)
+
           train_example = self._shard_input(train_example)
+
 
           if not self._flops_measured and not skip_jit:
             self._flops_measured = True
@@ -676,6 +678,7 @@ class PeftTrainer:
               self.model, self.optimizer, train_example
           )
 
+          print(f"DEBUGPRINT[51]: peft_trainer.py:677: aux={aux}")
           current_time = time.perf_counter()
           step_time_delta = current_time - last_step_completion_time
           last_step_completion_time = current_time

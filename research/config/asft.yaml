@@ -1,4 +1,4 @@
-exp_name: 27b-generated-Dolci-Instruct-ASFT-No-Tools-rank-64-1
+exp_name: 27b-generated-Dolci-Instruct-ASFT-No-Tools-rank-64-6
 project: tunix-final
 
 model_args:
@@ -7,7 +7,7 @@ model_args:
   model_id: google/gemma-3-1b-it
   hf_tokenizer_path: google/gemma-3-1b-it
   mesh_axis_names: [fsdp, tp]
-  mesh_shape: [4, 1]
+  mesh_shape: [2, 2]
   remat: BLOCK  
   rng_seed: 42
   lora_config:
@@ -49,7 +49,7 @@ data_args:
   num_eval_examples: null  
   prompt_column: prompt
   answer_column: generated
-  batch_size: 8
+  batch_size: 4
   shuffle: true
   shuffle_seed: 42
   chat_template_path: ./gemma_think_new.jinja
@@ -59,3 +59,4 @@ asft_config:
   use_dft_weighting: true
   kl_weight: 0.1
   kl_direction: REVERSE
+  kl_top_k: 50
