@@ -1,8 +1,10 @@
 import dataclasses
 import draccus
 import os
+import warnings
 from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
+from functools import partial
 from typing import Any, Callable, Iterable
 import jax
 import numpy as np
@@ -16,12 +18,103 @@ from metrax.logging import WandbBackend
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from termcolor import colored
 
+# Suppress overflow warning from perplexity calculation (expected with sum loss)
+warnings.filterwarnings(
+    "ignore", message="overflow encountered in exp", category=RuntimeWarning
+)
 
 
 from tunix.cli.utils import model as cli_model_lib
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 from tunix.sft import utils
+import jax.numpy as jnp
+
+
+def sum_loss_fn(
+    model: nnx.Module,
+    input_tokens: jax.Array,
+    input_mask: jax.Array,
+    positions: jax.Array,
+    attention_mask: jax.Array,
+) -> tuple[jax.Array, dict[str, jax.Array]]:
+    """Loss function using sum instead of mean for proper grad accumulation.
+
+    Returns:
+        Tuple of (loss, aux) where aux contains num_tokens for this batch.
+    """
+    logits, _ = model(input_tokens, positions, None, attention_mask)
+
+    # Exclude the last step as it does not appear in the targets.
+    logits = logits[:, :-1, :]
+    target_tokens = input_tokens[:, 1:]
+    target_mask = input_mask[:, 1:]
+
+    # Convert the target labels to one-hot encoded vectors.
+    one_hot = jax.nn.one_hot(target_tokens, logits.shape[-1])
+
+    # Don't update on unwanted tokens.
+    one_hot = one_hot * target_mask.astype(one_hot.dtype)[..., None]
+
+    # Count number of tokens (non-zero mask entries)
+    num_tokens = jnp.sum(target_mask)
+
+    # Return the sum of negative log likelihood (NLL) loss.
+    # User will adjust LR by 1/(avg tokens per accumulated batch) in config.
+    loss = -jnp.sum(jax.nn.log_softmax(logits) * one_hot)
+    return loss, {"num_tokens": num_tokens}
+
+
+def apply_chat_template_map(
+    batch: dict,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt_column: str,
+    answer_column: str,
+    max_seq_length: int,
+) -> dict:
+    """Apply chat template to a batch of examples.
+
+    Args:
+        batch: Dict with prompt and answer columns (lists).
+        tokenizer: Tokenizer with chat template.
+        prompt_column: Column name for prompts.
+        answer_column: Column name for answers.
+        max_seq_length: Maximum sequence length.
+
+    Returns:
+        Dict with input_tokens and input_mask arrays.
+    """
+    batch_size = len(batch[prompt_column])
+    all_input_tokens = []
+    all_input_masks = []
+
+    for i in range(batch_size):
+        prompt = batch[prompt_column][i]
+        answer = batch[answer_column][i]
+        messages = [
+            {"role": "user", "content": str(prompt)},
+            {"role": "assistant", "content": str(answer)},
+        ]
+
+        encoded = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
+            return_assistant_tokens_mask=True,
+            return_tensors="np",
+            truncation=True,
+            max_length=max_seq_length,
+            padding="max_length",
+            return_dict=True,
+        )
+        all_input_tokens.append(encoded["input_ids"][0])
+        all_input_masks.append(np.array(encoded["assistant_masks"][0], dtype=np.int32))
+
+    return {
+        "input_tokens": np.stack(all_input_tokens),
+        "input_mask": np.stack(all_input_masks),
+    }
+
 
 def format_colorized(
     tokens: list[int],
@@ -63,9 +156,9 @@ def format_colorized(
     flush_current_run()
     return "".join(chunks)
 
+
 def visualize_batch(
-    batch_tokens: np.ndarray,
-    batch_masks: np.ndarray,
+    batch: dict,
     tokenizer: PreTrainedTokenizerBase,
     num_examples: int = 2,
 ) -> None:
@@ -78,14 +171,23 @@ def visualize_batch(
     print("TOKENIZATION VISUALIZATION (Green=loss, Yellow=no loss/padding)")
     print("=" * 80)
 
+    batch_tokens = batch["input_tokens"]
+    batch_masks = batch["input_mask"]
+
     for i in range(min(num_examples, len(batch_tokens))):
         tokens = batch_tokens[i].tolist()
         weights = batch_masks[i].tolist()
 
-        print(f"\n--- Example {i + 1} (total_len={len(tokens)}) ---")
+        non_pad = sum(1 for t in tokens if t != 0)
+        assistant_tokens = sum(weights)
+
+        print(
+            f"\n--- Example {i + 1} (total_len={len(tokens)}, non_pad={non_pad}, assistant_tokens={assistant_tokens}) ---"
+        )
         print(format_colorized(tokens, weights, tokenizer))
 
     print("\n" + "=" * 80 + "\n")
+
 
 class ModelFamily(Enum):
     """Model family enum for dispatching to correct model loader."""
@@ -343,159 +445,113 @@ class DataArgs:
     """Data configuration for HuggingFace datasets."""
 
     tokenizer_path: str
-    chat_template_path: str | None 
-    path: str 
+    chat_template_path: str | None
+    path: str
     name: str | None = None
     split: str = "train"
-    eval_split: str | None = "test"
-    split_ratio: float = 0.05 
+    eval_split: str | None = None
     max_seq_length: int = 2048
     num_train_examples: int | None = None
     num_eval_examples: int | None = None
-    prompt_column: str = "messages"
-    answer_column: str | None = (
-        None  
-    )
+    prompt_column: str = "prompt"
+    answer_column: str = "generated"
     batch_size: int = 4
     shuffle: bool = True
     shuffle_seed: int = 42
     epochs: int = 1
+    shuffle_buffer_size: int = 10000
 
     def __post_init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
         if self.chat_template_path:
-            self.tokenizer.chat_template = open(self.chat_template_path).read()
+            with open(self.chat_template_path) as f:
+                self.tokenizer.chat_template = f.read()
 
     def make(self) -> tuple[Iterable, Iterable | None]:
+        """Create train and eval data iterators using .shuffle().batch().map() pipeline."""
         load_kwargs = {"path": self.path, "split": self.split}
         if self.name:
             load_kwargs["name"] = self.name
 
-        full_ds = load_dataset(**load_kwargs)
+        # Load as iterable dataset for streaming
+        ds = load_dataset(**load_kwargs, streaming=True)
 
+        # Create map function with partial
+        map_fn = partial(
+            apply_chat_template_map,
+            tokenizer=self.tokenizer,
+            prompt_column=self.prompt_column,
+            answer_column=self.answer_column,
+            max_seq_length=self.max_seq_length,
+        )
+
+        # Pipeline: shuffle -> batch -> map
         if self.shuffle:
-            full_ds = full_ds.shuffle(seed=self.shuffle_seed)
+            ds = ds.shuffle(
+                seed=self.shuffle_seed, buffer_size=self.shuffle_buffer_size
+            )
 
-        if self.num_train_examples:
-            full_ds = full_ds.select(range(min(self.num_train_examples, len(full_ds))))
+        ds = ds.batch(batch_size=self.batch_size)
+        ds = ds.map(map_fn)
 
-        eval_ds = None
+        # Handle epochs by repeating the iterator
+        def training_input_iterator():
+            for _ in range(self.epochs):
+                for batch in ds:
+                    yield peft_trainer.TrainingInput(
+                        input_tokens=batch["input_tokens"],
+                        input_mask=batch["input_mask"],
+                    )
+
+        # Handle eval dataset
+        eval_iter = None
         if self.eval_split:
             try:
                 eval_load_kwargs = {"path": self.path, "split": self.eval_split}
                 if self.name:
                     eval_load_kwargs["name"] = self.name
-                eval_ds = load_dataset(**eval_load_kwargs)
-                if self.num_eval_examples:
-                    eval_ds = eval_ds.select(
-                        range(min(self.num_eval_examples, len(eval_ds)))
-                    )
+                eval_ds = load_dataset(**eval_load_kwargs, streaming=True)
+                eval_ds = eval_ds.batch(batch_size=self.batch_size)
+                eval_ds = eval_ds.map(map_fn)
+
+                def eval_iterator():
+                    for batch in eval_ds:
+                        yield peft_trainer.TrainingInput(
+                            input_tokens=batch["input_tokens"],
+                            input_mask=batch["input_mask"],
+                        )
+
+                eval_iter = eval_iterator()
             except Exception as e:
                 print(f"Could not load eval split '{self.eval_split}': {e}")
-                eval_ds = None
-            train_ds = full_ds
-        elif self.split_ratio > 0:
-            split_result = full_ds.train_test_split(
-                test_size=self.split_ratio, seed=self.shuffle_seed
+
+        return training_input_iterator(), eval_iter
+
+    def make_visualization_batch(self) -> dict:
+        """Create a single batch for visualization using next(iter(ds))."""
+        load_kwargs = {"path": self.path, "split": self.split}
+        if self.name:
+            load_kwargs["name"] = self.name
+
+        ds = load_dataset(**load_kwargs, streaming=True)
+
+        if self.shuffle:
+            ds = ds.shuffle(
+                seed=self.shuffle_seed, buffer_size=self.shuffle_buffer_size
             )
-            train_ds = split_result["train"]
-            eval_ds = split_result["test"]
-            if self.num_eval_examples:
-                eval_ds = eval_ds.select(
-                    range(min(self.num_eval_examples, len(eval_ds)))
-                )
-            print(f"Split dataset: {len(train_ds)} train, {len(eval_ds)} eval")
-        else:
-            train_ds = full_ds
 
-        if self.epochs > 1:
-            train_ds = train_ds.repeat(self.epochs)
-            print(f"Repeating train dataset for {self.epochs} epochs")
+        map_fn = partial(
+            apply_chat_template_map,
+            tokenizer=self.tokenizer,
+            prompt_column=self.prompt_column,
+            answer_column=self.answer_column,
+            max_seq_length=self.max_seq_length,
+        )
 
-        train_iter = self._create_data_iterator(train_ds)
-        eval_iter = None
-        if eval_ds is not None:
-            eval_iter = self._create_data_iterator(eval_ds, is_eval=True)
+        ds = ds.batch(batch_size=self.batch_size)
+        ds = ds.map(map_fn)
 
-        return train_iter, eval_iter
-
-    def _create_data_iterator(
-        self,
-        dataset,
-        is_eval: bool = False,
-    ) -> Iterable:
-        """Create a data iterator that yields TrainingInput batches."""
-
-        def process_example(example):
-            """Process a single example into tokens."""
-            if self.answer_column is not None:
-                prompt = example[self.prompt_column]
-                answer = example[self.answer_column]
-                messages = [
-                    {"role": "user", "content": str(prompt)},
-                    {"role": "assistant", "content": str(answer)},
-                ]
-            else:
-                # Use prompt_column as-is (expects messages format)
-                messages = example[self.prompt_column]
-                if not isinstance(messages, list):
-                    messages = [{"role": "user", "content": str(messages)}]
-                elif len(messages) > 0 and not isinstance(messages[0], dict):
-                    messages = [{"role": "user", "content": " ".join(messages)}]
-
-            # Prepend <reasoning> tag to assistant messages
-            for msg in messages:
-                if msg.get("role") == "assistant":
-                    msg["content"] = "<reasoning>\n" + msg["content"]
-
-            encoded = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=False,
-                return_assistant_tokens_mask=True,
-                return_tensors="np",
-                truncation=True,
-                max_length=self.max_seq_length,
-                padding="max_length",
-                return_dict=True,
-            )
-            input_tokens = encoded["input_ids"][0]
-
-            # assistant_mask marks which tokens are from assistant (1) vs user/system (0)
-            # This is used as input_mask so loss is only computed on assistant tokens
-            assistant_mask = np.array(encoded["assistant_masks"][0], dtype=np.int32)
-
-            return input_tokens, assistant_mask
-
-        def batch_generator():
-            """Generate batches of TrainingInput."""
-            batch_tokens = []
-            batch_masks = []
-
-            for example in dataset:
-                try:
-                    input_tokens, assistant_mask = process_example(example)
-                    batch_tokens.append(input_tokens)
-                    batch_masks.append(assistant_mask)
-
-                    if len(batch_tokens) >= self.batch_size:
-                        yield peft_trainer.TrainingInput(
-                            input_tokens=np.stack(batch_tokens),
-                            input_mask=np.stack(batch_masks),
-                        )
-                        batch_tokens = []
-                        batch_masks = []
-                except Exception as e:
-                    print(f"Error processing example: {e}")
-                    continue
-
-            if batch_tokens:
-                yield peft_trainer.TrainingInput(
-                    input_tokens=np.stack(batch_tokens),
-                    input_mask=np.stack(batch_masks),
-                )
-
-        return batch_generator()
+        return next(iter(ds))
 
 
 @dataclass
@@ -507,6 +563,69 @@ class Args:
     model_args: ModelArgs = field(default_factory=ModelArgs)
     training_args: TrainingArgs = field(default_factory=TrainingArgs)
     data_args: DataArgs = field(default_factory=DataArgs)
+
+
+class TokenTrackingTrainer(peft_trainer.PeftTrainer):
+    """PeftTrainer subclass that tracks token counts."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._tokens_in_grad_acc_window = (
+            0  # tokens accumulated in current grad acc window
+        )
+        self._loss_in_grad_acc_window = (
+            0.0  # loss accumulated in current grad acc window
+        )
+        self._total_tokens = 0  # cumulative tokens across all training
+
+    def _post_process_train_step(self, aux: dict | None) -> None:
+        """Accumulate token counts from aux data."""
+        if aux is None:
+            return
+
+        num_tokens = aux.get("num_tokens", 0)
+        if isinstance(num_tokens, jax.Array):
+            num_tokens = int(jax.device_get(num_tokens))
+
+        self._tokens_in_grad_acc_window += num_tokens
+        self._total_tokens += num_tokens
+
+        # Accumulate loss from buffered metrics
+        if (
+            self._buffered_train_metrics is not None
+            and self._buffered_train_metrics.losses
+        ):
+            last_loss = self._buffered_train_metrics.losses[-1]
+            if isinstance(last_loss, jax.Array):
+                last_loss = float(jax.device_get(last_loss))
+            self._loss_in_grad_acc_window += last_loss
+
+        grad_acc_steps = self.config.get_with_default("gradient_accumulation_steps", 1)
+
+        # Check if we hit the grad accumulation boundary
+        if self._iter_steps % grad_acc_steps == (grad_acc_steps - 1):
+            # Compute mean token loss
+            mean_token_loss = self._loss_in_grad_acc_window / max(
+                self._tokens_in_grad_acc_window, 1
+            )
+
+            # Log tokens for this grad acc window
+            if self._buffered_train_metrics is not None:
+                self._buffered_train_metrics.additional_metrics["tokens_per_update"] = (
+                    [self._tokens_in_grad_acc_window],
+                    lambda x: np.sum(x),
+                )
+                self._buffered_train_metrics.additional_metrics["total_tokens"] = (
+                    [self._total_tokens],
+                    lambda x: x[-1],  # just take the latest value
+                )
+                self._buffered_train_metrics.additional_metrics["mean_token_loss"] = (
+                    [mean_token_loss],
+                    lambda x: x[-1],
+                )
+            # Reset window counters
+            self._tokens_in_grad_acc_window = 0
+            self._loss_in_grad_acc_window = 0.0
 
 
 class Pipeline:
@@ -547,19 +666,16 @@ class Pipeline:
         model, tokenizer = self._create_model_and_tokenizer()
 
         print("Loading datasets...")
-        train_ds, eval_ds = self.args.data_args.make()
-        first_batch = next(iter(train_ds))
+        # Visualize first batch using next(iter(ds))
+        first_batch = self.args.data_args.make_visualization_batch()
         print(
-            f"First batch shape: input_tokens={first_batch.input_tokens.shape}, "
-            f"input_mask={first_batch.input_mask.shape}"
+            f"First batch shape: input_tokens={first_batch['input_tokens'].shape}, "
+            f"input_mask={first_batch['input_mask'].shape}"
         )
+        visualize_batch(first_batch, self.args.data_args.tokenizer, num_examples=2)
 
-        visualize_batch(
-            first_batch.input_tokens,
-            first_batch.input_mask,
-            tokenizer,
-            num_examples=2,
-        )
+        # Create actual training iterators
+        train_ds, eval_ds = self.args.data_args.make()
 
         def logging_factory():
             config = asdict(self.args)
@@ -570,13 +686,14 @@ class Pipeline:
             backend_factories=[logging_factory],
         )
 
-        trainer = peft_trainer.PeftTrainer(
+        trainer = TokenTrackingTrainer(
             model=model,
             optimizer=optimizer,
             training_config=training_config,
         )
 
         trainer = trainer.with_gen_model_input_fn(self._gen_model_input_fn)
+        trainer = trainer.with_loss_fn(sum_loss_fn, has_aux=True)
         print(f"\nStarting training for {self.args.training_args.max_steps} steps...")
         mesh = self.args.model_args.create_mesh()
 
@@ -597,4 +714,3 @@ def main(cfg: Args):
 
 if __name__ == "__main__":
     main()
-
