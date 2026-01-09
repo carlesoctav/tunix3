@@ -38,6 +38,12 @@ def parse_args():
     p.add_argument("--hf-repo-id", type=str, required=True)
     p.add_argument("--output-dir", type=str, default="./exported_model")
     p.add_argument("--mesh-shape", type=str, default="4,1")
+    p.add_argument(
+        "--chat-template",
+        type=str,
+        default=None,
+        help="Path to chat template jinja file",
+    )
     p.add_argument("--no-upload", action="store_true")
     return p.parse_args()
 
@@ -95,7 +101,22 @@ def main():
         alpha=lora_alpha,
     )
 
-    # 7. Upload
+    # 7. Copy chat template if provided
+    if args.chat_template:
+        print(f"Copying chat template: {args.chat_template}")
+        template_content = open(args.chat_template).read()
+        # Update tokenizer_config.json with chat template
+        tokenizer_config_path = os.path.join(output_dir, "tokenizer_config.json")
+        if os.path.exists(tokenizer_config_path):
+            import json
+
+            with open(tokenizer_config_path) as f:
+                tokenizer_config = json.load(f)
+            tokenizer_config["chat_template"] = template_content
+            with open(tokenizer_config_path, "w") as f:
+                json.dump(tokenizer_config, f, indent=2)
+
+    # 8. Upload
     if not args.no_upload:
         print(f"Uploading to {args.hf_repo_id}...")
         token = os.environ.get("HF_TOKEN")
