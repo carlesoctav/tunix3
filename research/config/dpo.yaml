@@ -1,5 +1,5 @@
-exp_name: 27b-generated-Dolci-Instruct-SFT-No-Tools-rank-256-lr-5e7
-project: tunix-finale
+exp_name: dpo-gemma3-1b-dpo-sample
+project: tunix-dpo
 
 model_args:
   model_family: Gemma3
@@ -10,47 +10,57 @@ model_args:
   mesh_shape: [4, 1]
   remat: BLOCK  
   rng_seed: 42
+  use_ref_model: true
   lora_config:
-    rank: 256
-    alpha: 512 
+    rank: 128
+    alpha: 256 
     module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
 
 training_args:
-  max_steps: 21218
-  eval_every_n_steps: 3000
+  max_steps: 5000
+  eval_every_n_steps: 500
   gradient_accumulation_steps: 4  
-  checkpoint_root_directory: gs://carles-git-good/tunix-final-sft
+  checkpoint_root_directory: gs://carles-git-good/tunix-dpo
   log_dir: /mnt/carles/logs
   flush_every_n_steps: 20
   checkpointing_options:
-    save_interval_steps: 5000
+    save_interval_steps: 1000
     max_to_keep: 4
+  # DPO-specific configs
+  algorithm: dpo  # "dpo" or "orpo"
+  beta: 0.1  # KL penalty weight for DPO
+  lambda_orpo: 0.1  # Weight for preference loss (ORPO only)
+  label_smoothing: 0.0
+  max_prompt_length: 512
+  max_response_length: 1024
   optimizer_config:
-    opt_type: adam
+    opt_type: adamw
     peak_value: 5e-7
     init_value: 0.0
     end_value: 0.0
-    warmup_ratio: 0.03
+    warmup_ratio: 0.1
     warmup_steps: null
     decay_steps: null
     b1: 0.9
     b2: 0.99
-    weight_decay: 0
+    weight_decay: 0.01
     max_grad_norm: 1.0
-    schedule_type: warmup_cosine_decay_schedule  
+    schedule_type: warmup_cosine_decay_schedule
+
 data_args:
-  path: carlesoctav/filtered-2048-27b-generated-Dolci-Instruct-SFT-No-Tools 
+  path: carlesoctav/dpo-sample
   name: null
   split: train
   eval_split: null 
-  split_ratio: 0 
-  max_seq_length: 2048
+  split_ratio: 0.05
+  max_prompt_length: 512
+  max_response_length: 1024
   num_train_examples: null
   num_eval_examples: null  
   prompt_column: prompt
-  answer_column: generated
-  batch_size: 8
+  chosen_column: chosen
+  rejected_column: rejected
+  batch_size: 2
   shuffle: true
   shuffle_seed: 42
-  chat_template_path: ./gemma_think_new.jinja
-  tokenizer_path: google/gemma-3-1b-it 
+  tokenizer_path: google/gemma-3-1b-it
