@@ -1,0 +1,11 @@
+{
+  "correct": 524,
+  "total": 1319,
+  "accuracy": 39.72706595905989,
+  "temperature": 0.0,
+  "top_k": null,
+  "top_p": null,
+  "lora_checkpoint": "gs://carles-git-good/tunix-final-sft/4b-generated-Dolci-Instruct-SFT-No-Tools-rank-256-lr-1e6",
+  "lora_rank": 256,
+  "lora_alpha": 512
+}

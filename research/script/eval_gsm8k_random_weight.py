@@ -1,4 +1,4 @@
-"""GSM8K evaluation for 4B-teacher SFT LoRA with custom think template."""
+"""GSM8K evaluation for random weight LoRA."""
 
 import enum
 import json
@@ -9,6 +9,7 @@ from typing import Any
 
 import draccus
 import jax
+import jax.numpy as jnp
 from dotenv import load_dotenv
 from flax import nnx
 from huggingface_hub import snapshot_download
@@ -20,10 +21,24 @@ from research.reward import gsm8k as gsm8k_reward
 from tunix.cli.utils import model as cli_model_lib
 from tunix.examples.data import math_dataset
 from tunix.generate import sampler as sampler_lib
-from tunix.sft import checkpoint_manager
 
 
-GEMMA_THINK_TEMPLATE = """{{ bos_token }}{%- set first_user_prefix = 'Think through your approach in <reasoning></reasoning> tags, then provide your complete response in <answer></answer> tags. For creative tasks, briefly plan in reasoning, then write the full creative output in answer.\n\n' -%}{%- set loop_messages = messages -%}{%- for message in loop_messages -%}{%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}{{ raise_exception("Conversation roles must alternate user/assistant/user/assistant/...") }}{%- endif -%}{%- if (message['role'] == 'assistant') -%}{%- set role = "model" -%}{%- else -%}{%- set role = message['role'] -%}{%- endif -%}{{ '<start_of_turn>' + role + '\n' + (first_user_prefix if loop.first else "") }}{%- if message['role'] == 'assistant' -%}{%- generation -%}{%- if message['content'] is string -%}{{ message['content'] | trim }}{%- elif message['content'] is iterable -%}{%- for item in message['content'] -%}{%- if item['type'] == 'image' -%}{{ '<start_of_image>' }}{%- elif item['type'] == 'text' -%}{{ item['text'] | trim }}{%- endif -%}{%- endfor -%}{%- else -%}{{ raise_exception("Invalid content type") }}{%- endif -%}{{ '<end_of_turn>' }}{%- endgeneration -%}{{ '\n' }}{%- else -%}{%- if message['content'] is string -%}{{ message['content'] | trim }}{%- elif message['content'] is iterable -%}{%- for item in message['content'] -%}{%- if item['type'] == 'image' -%}{{ '<start_of_image>' }}{%- elif item['type'] == 'text' -%}{{ item['text'] | trim }}{%- endif -%}{%- endfor -%}{%- else -%}{{ raise_exception("Invalid content type") }}{%- endif -%}{%- endif -%}{%- if message['role'] != 'assistant' -%}{{ '<end_of_turn>\n' }}{%- endif -%}{%- endfor -%}{%- if add_generation_prompt -%}{{'<start_of_turn>model\n'}}{%- endif -%}"""
+reasoning_start = "<reasoning>"
+reasoning_end = "</reasoning>"
+solution_start = "<answer>"
+solution_end = "</answer>"
+
+
+SYSTEM_PROMPT = f"""You are given a problem. Think about the problem and \
+provide your reasoning. Place it between {reasoning_start} and \
+{reasoning_end}. Then, provide the final answer (i.e., just one numerical \
+value) between {solution_start} and {solution_end}."""
+
+TEMPLATE = """<start_of_turn>user
+{system_prompt}
+
+{question}<end_of_turn>
+<start_of_turn>model"""
 
 
 class ModelFamily(enum.Enum):
@@ -33,8 +48,8 @@ class ModelFamily(enum.Enum):
 
 @dataclass
 class LoraConfig:
-    rank: int = 256
-    alpha: float = 512.0
+    rank: int = 8
+    alpha: float = 16.0
     module_path: str = (
         ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
     )
@@ -47,6 +62,110 @@ class LoraConfig:
         }
 
 
+def check_ab_zero(model):
+    print("Checking if LoRA AB = 0...")
+    # Try to get LoRA parameters
+    try:
+        # Use nnx.state with LoRAParam. If it fails, try Variable.
+        state = nnx.state(model, nnx.LoRAParam)
+    except Exception as e:
+        print(f"Error getting LoRA state: {e}")
+        state = nnx.state(model, nnx.Variable)
+
+    if not state:
+        # Try getting all variables
+        state = nnx.state(model, nnx.Variable)
+
+    # print(f"State keys: {list(state.keys())[:5]}... Total: {len(state)}")
+
+    lora_layers = {}
+    for path, var in state.items():
+        is_a = any(part in ["w_lora_a", "kernel_lora_a"] for part in path)
+        is_b = any(part in ["w_lora_b", "kernel_lora_b"] for part in path)
+
+        if is_a or is_b:
+            base_path = []
+            for part in path:
+                if part in ["w_lora_a", "kernel_lora_a", "w_lora_b", "kernel_lora_b"]:
+                    break
+                base_path.append(part)
+            base_path = tuple(base_path)
+            if base_path not in lora_layers:
+                lora_layers[base_path] = {}
+            if is_a:
+                lora_layers[base_path]["a"] = var.value
+            else:
+                lora_layers[base_path]["b"] = var.value
+
+    if not lora_layers:
+        print("No LoRA layers found in state!")
+        return True
+
+    all_zero = True
+    for path, weights in lora_layers.items():
+        if "a" in weights and "b" in weights:
+            a = jnp.asarray(weights["a"])
+            b = jnp.asarray(weights["b"])
+
+            if a.ndim == 3:
+                d0, d1, d2 = a.shape
+                a_flat = a.reshape(d0 * d1, d2)
+            else:
+                a_flat = a
+
+            try:
+                # Based on safetensors_saver.py, it's (lora_a_val @ lora_b_val)
+                if a_flat.shape[-1] == b.shape[0]:
+                    prod = jnp.matmul(a_flat, b)
+                elif b.shape[-1] == a_flat.shape[0]:
+                    prod = jnp.matmul(b, a_flat)
+                else:
+                    print(
+                        f"Dimension mismatch for {path}: A_flat={a_flat.shape}, B={b.shape}"
+                    )
+                    all_zero = False
+                    continue
+
+                max_val = jnp.max(jnp.abs(prod))
+                if max_val > 1e-6:
+                    # print(f"  NOT ZERO for {path}: max_val={max_val}")
+                    all_zero = False
+            except Exception as e:
+                print(f"  Error for {path}: {e}")
+                all_zero = False
+
+    if all_zero:
+        print("Result: All LoRA AB products are zero.")
+    else:
+        print("Result: Some LoRA AB products are NOT zero.")
+    return all_zero
+
+
+def randomize_lora_weights(model, seed=42):
+    print(f"Randomizing LoRA weights with seed {seed}...")
+    key = jax.random.PRNGKey(seed)
+
+    # Try to get all variables to be safe
+    state = nnx.state(model, nnx.Variable)
+
+    new_flat_state = {}
+    for path, var in state.items():
+        if any(
+            part in ["w_lora_a", "kernel_lora_a", "w_lora_b", "kernel_lora_b"]
+            for part in path
+        ):
+            key, subkey = jax.random.split(key)
+            # Use a small scale to avoid complete divergence
+            new_val = (
+                jax.random.normal(subkey, var.value.shape, dtype=var.value.dtype) * 0.02
+            )
+            new_flat_state[path] = var.replace(value=new_val)
+        else:
+            new_flat_state[path] = var
+
+    nnx.update(model, nnx.State.from_flat_path(new_flat_state))
+
+
 @dataclass
 class ModelArgs:
     model_family: ModelFamily = ModelFamily.Gemma3
@@ -56,11 +175,6 @@ class ModelArgs:
     mesh_axis_names: tuple[str, ...] = ("fsdp", "tp")
     mesh_shape: tuple[int, ...] = (1, 1)
     lora_config: LoraConfig = field(default_factory=LoraConfig)
-    lora_checkpoint_path: str = (
-        "gs://carles-git-good/tunix-final-sft/"
-        "4b-generated-Dolci-Instruct-SFT-No-Tools-rank-256-lr-1e6"
-    )
-    checkpoint_step: int | None = None
     rng_seed: int = 42
 
     def create_mesh(self) -> Mesh:
@@ -112,27 +226,28 @@ class ModelArgs:
             f"LoRA applied (rank={self.lora_config.rank}, alpha={self.lora_config.alpha})"
         )
 
-        print(f"Loading LoRA weights from {self.lora_checkpoint_path}")
-        ckpt_mgr = checkpoint_manager.CheckpointManager(
-            root_directory=self.lora_checkpoint_path
-        )
-        step = self.checkpoint_step or ckpt_mgr.latest_step()
-        if step is None:
-            raise ValueError(f"No checkpoint found at {self.lora_checkpoint_path}")
-        print(f"Restoring from step {step}")
-        ckpt_mgr.maybe_restore(model, step=step, restore_only_lora_params=True)
-        print("LoRA weights restored successfully")
+        # Check AB before randomization
+
+        print("Checking AB before randomization:")
+        check_ab_zero(model)
+
+        # Randomize LoRA weights to satisfy "random weight" requirement
+        randomize_lora_weights(model, self.rng_seed)
+
+        # Check AB after randomization
+        print("Checking AB after randomization:")
+        check_ab_zero(model)
 
         tokenizer = AutoTokenizer.from_pretrained(self.hf_tokenizer_path)
-        tokenizer.chat_template = GEMMA_THINK_TEMPLATE
         return model, tokenizer, mesh, model_config
 
 
 @dataclass
 class EvalArgs:
+    rank: int = 8
     model: ModelArgs = field(default_factory=ModelArgs)
     data_dir: str = "./data/test"
-    output_dir: str = "./eval_results_4b_teacher_sft"
+    output_dir: str = "./eval_results_random_weight"
     batch_size: int = 4
     num_examples: int | None = None
     temperature: float = 0.0
@@ -152,10 +267,8 @@ def generate(
 ) -> tuple[list[str], list[str]]:
     input_batch = []
     for q in questions:
-        messages = [{"role": "user", "content": q}]
-        prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        prompt = TEMPLATE.format(system_prompt=SYSTEM_PROMPT, question=q)
+        print(f"DEBUGPRINT[52]: eval_gsm8k_random_weight.py:247: prompt={prompt}")
         input_batch.append(prompt)
 
     out_data = sampler(
@@ -252,9 +365,7 @@ def evaluate(
                 "temperature": temperature,
                 "top_k": top_k,
                 "top_p": top_p,
-                "lora_checkpoint": "gs://carles-git-good/tunix-final-sft/4b-generated-Dolci-Instruct-SFT-No-Tools-rank-256-lr-1e6",
-                "lora_rank": 256,
-                "lora_alpha": 512,
+                "lora_type": "random_weight",
             },
             f,
             indent=2,
@@ -268,7 +379,14 @@ def evaluate(
 def main(cfg: EvalArgs):
     load_dotenv()
 
-    print(f"Loading model: {cfg.model.model_name} with 4B-teacher SFT LoRA")
+    # Sync rank from EvalArgs to LoraConfig
+    cfg.model.lora_config.rank = cfg.rank
+    # Use alpha = 2 * rank as a common heuristic
+    cfg.model.lora_config.alpha = float(2 * cfg.rank)
+
+    print(
+        f"Loading model: {cfg.model.model_name} with random weight LoRA (rank={cfg.rank})"
+    )
     model, tokenizer, mesh, model_config = cfg.model.make()
 
     MAX_PROMPT_LENGTH = 1024
@@ -304,7 +422,9 @@ def main(cfg: EvalArgs):
     )
 
     print(f"\n{'=' * 50}")
-    print(f"Final Results (4B-teacher SFT): {correct}/{total} = {accuracy:.2f}%")
+    print(
+        f"Final Results (Random Weight LoRA, rank={cfg.rank}): {correct}/{total} = {accuracy:.2f}%"
+    )
     print(f"{'=' * 50}")
 
 

@@ -1,0 +1,8 @@
+{
+  "correct": 737,
+  "total": 1319,
+  "accuracy": 55.875663381349504,
+  "temperature": 0.0,
+  "top_k": null,
+  "top_p": null
+}

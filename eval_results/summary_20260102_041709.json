@@ -1,0 +1,8 @@
+{
+  "correct": 1,
+  "total": 20,
+  "accuracy": 5.0,
+  "temperature": 0.0,
+  "top_k": null,
+  "top_p": null
+}

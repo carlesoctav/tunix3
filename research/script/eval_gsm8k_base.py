@@ -1,13 +1,15 @@
-"""GSM8K baseline evaluation script (no LoRA)."""
+"""GSM8K evaluation for base model (no LoRA)."""
 
 import enum
 import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 import draccus
 import jax
+import jax.numpy as jnp
 from dotenv import load_dotenv
 from flax import nnx
 from huggingface_hub import snapshot_download
@@ -18,6 +20,24 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from research.reward import gsm8k as gsm8k_reward
 from tunix.examples.data import math_dataset
 from tunix.generate import sampler as sampler_lib
+
+
+reasoning_start = "<reasoning>"
+reasoning_end = "</reasoning>"
+solution_start = "<answer>"
+solution_end = "</answer>"
+
+
+SYSTEM_PROMPT = f"""You are given a problem. Think about the problem and \
+provide your reasoning. Place it between {reasoning_start} and \
+{reasoning_end}. Then, provide the final answer (i.e., just one numerical \
+value) between {solution_start} and {solution_end}."""
+
+TEMPLATE = """<start_of_turn>user
+{system_prompt}
+
+{question}<end_of_turn>
+<start_of_turn>model"""
 
 
 class ModelFamily(enum.Enum):
@@ -43,7 +63,7 @@ class ModelArgs:
             print(f"Adjusted mesh to ({device_count}, 1)")
         return jax.make_mesh(mesh_shape, axis_names=self.mesh_axis_names)
 
-    def make(self) -> tuple[nnx.Module, PreTrainedTokenizerBase, Mesh, any]:
+    def make(self) -> tuple[nnx.Module, PreTrainedTokenizerBase, Mesh, Any]:
         mesh = self.create_mesh()
 
         print(f"Downloading/Loading {self.model_id} from Hugging Face...")
@@ -76,6 +96,8 @@ class ModelArgs:
         else:
             raise NotImplementedError(f"Model family {self.model_family} not supported")
 
+        print("Model loaded (Base model, no LoRA).")
+
         tokenizer = AutoTokenizer.from_pretrained(self.hf_tokenizer_path)
         return model, tokenizer, mesh, model_config
 
@@ -104,10 +126,7 @@ def generate(
 ) -> tuple[list[str], list[str]]:
     input_batch = []
     for q in questions:
-        messages = [{"role": "user", "content": q}]
-        prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        prompt = TEMPLATE.format(system_prompt=SYSTEM_PROMPT, question=q)
         input_batch.append(prompt)
 
     out_data = sampler(
@@ -139,7 +158,7 @@ def evaluate(
     os.makedirs(output_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(output_dir, f"rollouts_base_{timestamp}.jsonl")
+    output_file = os.path.join(output_dir, f"rollouts_{timestamp}.jsonl")
 
     print(f"Writing rollouts to {output_file}")
 
@@ -167,9 +186,11 @@ def evaluate(
                 answer_str = str(answer)
 
                 score = gsm8k_reward.compute_score(
-                    response, answer_str, method="strict"
+                    response, answer_str, method="flexible"
                 )
-                extracted = gsm8k_reward.extract_gsm8k_answer(response, method="strict")
+                extracted = gsm8k_reward.extract_gsm8k_answer(
+                    response, method="flexible"
+                )
 
                 correct += int(score)
                 total += 1
@@ -192,7 +213,7 @@ def evaluate(
 
     accuracy = correct / total * 100 if total > 0 else 0.0
 
-    summary_file = os.path.join(output_dir, f"summary_base_{timestamp}.json")
+    summary_file = os.path.join(output_dir, f"summary_{timestamp}.json")
     with open(summary_file, "w") as f:
         json.dump(
             {
@@ -202,6 +223,7 @@ def evaluate(
                 "temperature": temperature,
                 "top_k": top_k,
                 "top_p": top_p,
+                "lora_type": "none (base model)",
             },
             f,
             indent=2,
@@ -215,7 +237,7 @@ def evaluate(
 def main(cfg: EvalArgs):
     load_dotenv()
 
-    print(f"Loading base model: {cfg.model.model_name} (no LoRA)")
+    print(f"Loading model: {cfg.model.model_name} (Base Model)")
     model, tokenizer, mesh, model_config = cfg.model.make()
 
     MAX_PROMPT_LENGTH = 1024
@@ -251,7 +273,7 @@ def main(cfg: EvalArgs):
     )
 
     print(f"\n{'=' * 50}")
-    print(f"Final Results (Base): {correct}/{total} = {accuracy:.2f}%")
+    print(f"Final Results (Base Model): {correct}/{total} = {accuracy:.2f}%")
     print(f"{'=' * 50}")
 
 

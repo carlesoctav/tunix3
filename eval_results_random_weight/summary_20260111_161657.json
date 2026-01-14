@@ -1,0 +1,9 @@
+{
+  "correct": 0,
+  "total": 0,
+  "accuracy": 0.0,
+  "temperature": 0.0,
+  "top_k": null,
+  "top_p": null,
+  "lora_type": "random_weight"
+}

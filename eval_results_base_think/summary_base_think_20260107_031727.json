@@ -1,0 +1,10 @@
+{
+  "correct": 580,
+  "total": 1319,
+  "accuracy": 43.97270659590599,
+  "temperature": 0.0,
+  "top_k": null,
+  "top_p": null,
+  "model": "google/gemma-3-1b-it (base, no LoRA)",
+  "prompt_template": "gemma_think (reasoning/answer tags)"
+}

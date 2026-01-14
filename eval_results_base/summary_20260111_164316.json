@@ -1,0 +1,9 @@
+{
+  "correct": 192,
+  "total": 1319,
+  "accuracy": 14.556482183472328,
+  "temperature": 0.0,
+  "top_k": null,
+  "top_p": null,
+  "lora_type": "none (base model)"
+}
